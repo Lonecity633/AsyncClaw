@@ -1,0 +1,371 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from AsyncClaw.channels import AgentRequest, AgentService
+from AsyncClaw.agent.workspace import WorkspaceStore
+from AsyncClaw.cli.main import main
+from AsyncClaw.config import LLMConfig
+from AsyncClaw.channels.service import _resolve_env_file
+from AsyncClaw.cli.agent import _normalize_user_input
+
+
+class SimpleLLM:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def create_chat_completion(self, **kwargs):
+        self.requests.append(kwargs)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "你好，我是 AsyncClaw",
+                    }
+                }
+            ]
+        }
+
+
+class ToolCallingLLM:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def create_chat_completion(self, **kwargs):
+        self.requests.append(kwargs)
+        if len(self.requests) == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_multiply",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "multiply",
+                                        "arguments": json.dumps({"a": 2, "b": 4}),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "2 * 4 = 8",
+                    }
+                }
+            ]
+        }
+
+
+class SaveProfileLLM:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def create_chat_completion(self, **kwargs):
+        self.requests.append(kwargs)
+        if len(self.requests) == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_save_profile",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "save_user_profile",
+                                        "arguments": json.dumps(
+                                            {"profile_markdown": "# 用户画像\n- 常用 pyclaw"}
+                                        ),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "记住了",
+                    }
+                }
+            ]
+        }
+
+
+class AgentServiceTest(unittest.TestCase):
+    def test_service_handles_text_from_configured_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory) / "outside"
+            project_root = Path(directory) / "project"
+            cwd.mkdir()
+            project_root.mkdir()
+            with patch("AsyncClaw.channels.service._project_root", return_value=project_root):
+                service = AgentService(
+                    cwd=cwd,
+                    llm=SimpleLLM(),
+                    config=LLMConfig(
+                        api_key="test-key",
+                        model="test-model",
+                        base_url="https://example.test/v1",
+                        provider="openai",
+                        agent_max_steps=3,
+                    ),
+                )
+
+                response = service.handle_text("你好")
+                session_exists = service.workspace.session_path.exists()
+                outside_session_exists = (cwd / "workspace" / "session").exists()
+
+        self.assertEqual(response.output, "你好，我是 AsyncClaw")
+        self.assertEqual(response.cwd, cwd.resolve())
+        self.assertEqual(response.steps, 1)
+        self.assertEqual(response.session_id, service.workspace.session_id)
+        self.assertEqual(service.max_steps, 3)
+        self.assertEqual(service.workspace.root, project_root.resolve() / "workspace")
+        self.assertEqual(service.tool_context.cwd, cwd.resolve())
+        self.assertEqual(service.tool_context.sandbox_root, service.workspace.root / "office")
+        self.assertEqual(service.log_path, project_root.resolve() / "logs" / "events.jsonl")
+        self.assertTrue(service.tool_context.allow_shell_exec)
+        self.assertTrue(session_exists)
+        self.assertFalse(outside_session_exists)
+
+    def test_service_can_disable_shell_tool_for_non_cli_channels(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project_root = Path(directory) / "project"
+            project_root.mkdir()
+            with patch("AsyncClaw.channels.service._project_root", return_value=project_root):
+                service = AgentService(
+                    cwd=directory,
+                    llm=SimpleLLM(),
+                    allow_shell_exec=False,
+                )
+
+            tool_names = [
+                tool["function"]["name"]
+                for tool in service.tools.to_openai_tools()
+            ]
+
+        self.assertNotIn("shell_exec", tool_names)
+        self.assertFalse(service.tool_context.allow_shell_exec)
+
+    def test_service_returns_tool_observations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project_root = Path(directory) / "project"
+            project_root.mkdir()
+            with patch("AsyncClaw.channels.service._project_root", return_value=project_root):
+                response = AgentService(
+                    cwd=directory,
+                    llm=ToolCallingLLM(),
+                ).handle(AgentRequest(text="2 乘以 4"))
+
+        self.assertEqual(response.output, "2 * 4 = 8")
+        self.assertEqual(response.observations[0]["name"], "multiply")
+        self.assertEqual(response.observations[0]["result"], {"product": 8})
+
+    def test_service_rejects_empty_text(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project_root = Path(directory) / "project"
+            project_root.mkdir()
+            with patch("AsyncClaw.channels.service._project_root", return_value=project_root):
+                service = AgentService(cwd=directory, llm=SimpleLLM())
+
+                with self.assertRaisesRegex(ValueError, "输入不能为空"):
+                    service.handle_text("   ")
+
+    def test_service_can_use_explicit_workspace_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory) / "outside"
+            workspace_root = Path(directory) / "state"
+            cwd.mkdir()
+            service = AgentService(
+                cwd=cwd,
+                workspace_root=workspace_root,
+                llm=SimpleLLM(),
+            )
+
+            response = service.handle_text("你好")
+            session_exists = service.workspace.session_path.exists()
+            outside_session_exists = (cwd / "workspace" / "session").exists()
+
+        self.assertEqual(response.cwd, cwd.resolve())
+        self.assertEqual(service.workspace.root, workspace_root.resolve())
+        self.assertEqual(service.tool_context.sandbox_root, workspace_root.resolve() / "office")
+        self.assertEqual(service.log_path, workspace_root.resolve() / "logs" / "events.jsonl")
+        self.assertTrue(session_exists)
+        self.assertFalse(outside_session_exists)
+
+    def test_service_keeps_custom_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = WorkspaceStore(root=Path(directory) / "custom-workspace")
+            service = AgentService(
+                cwd=directory,
+                workspace_root=Path(directory) / "ignored",
+                workspace=workspace,
+                llm=SimpleLLM(),
+            )
+
+        self.assertIs(service.workspace, workspace)
+        self.assertEqual(service.tool_context.sandbox_root, workspace.root / "office")
+
+    def test_service_records_saved_profile_in_project_workspace_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory) / "outside"
+            project_root = Path(directory) / "project"
+            cwd.mkdir()
+            project_root.mkdir()
+            with patch("AsyncClaw.channels.service._project_root", return_value=project_root):
+                service = AgentService(
+                    cwd=cwd,
+                    llm=SaveProfileLLM(),
+                )
+
+                response = service.handle_text("记住我常用 pyclaw")
+                profile = service.workspace.load_user_profile()
+                turns = service.workspace.load_session_turns()
+
+        self.assertEqual(response.output, "记住了")
+        self.assertEqual(profile, "# 用户画像\n- 常用 pyclaw")
+        self.assertEqual(service.workspace.root, project_root.resolve() / "workspace")
+        self.assertEqual([message["role"] for message in turns[-1]["messages"]], [
+            "user",
+            "assistant",
+            "tool",
+            "assistant",
+        ])
+        self.assertEqual(turns[-1]["messages"][2]["name"], "save_user_profile")
+
+
+class EnvFileResolutionTest(unittest.TestCase):
+    def test_default_env_file_prefers_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory) / "run"
+            project_root = Path(directory) / "project"
+            cwd.mkdir()
+            project_root.mkdir()
+            cwd_env = cwd / ".env"
+            project_env = project_root / ".env"
+            cwd_env.write_text("OPENAI_API_KEY=cwd-key\n", encoding="utf-8")
+            project_env.write_text("OPENAI_API_KEY=project-key\n", encoding="utf-8")
+
+            with patch("AsyncClaw.channels.service._project_root", return_value=project_root):
+                resolved = _resolve_env_file(cwd, ".env")
+
+        self.assertEqual(resolved, cwd_env)
+
+    def test_default_env_file_falls_back_to_project_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory) / "run"
+            project_root = Path(directory) / "project"
+            cwd.mkdir()
+            project_root.mkdir()
+            project_env = project_root / ".env"
+            project_env.write_text("OPENAI_API_KEY=project-key\n", encoding="utf-8")
+
+            with patch("AsyncClaw.channels.service._project_root", return_value=project_root):
+                resolved = _resolve_env_file(cwd, ".env")
+
+        self.assertEqual(resolved, project_env)
+
+    def test_explicit_relative_env_file_resolves_from_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = Path(directory) / "run"
+            project_root = Path(directory) / "project"
+            cwd.mkdir()
+            project_root.mkdir()
+            project_env = project_root / ".env.test"
+            project_env.write_text("OPENAI_API_KEY=project-key\n", encoding="utf-8")
+
+            with patch("AsyncClaw.channels.service._project_root", return_value=project_root):
+                resolved = _resolve_env_file(cwd, ".env.test", explicit=True)
+
+        self.assertEqual(resolved, cwd / ".env.test")
+
+    def test_absolute_env_file_is_kept(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env_file = Path(directory) / ".env.any"
+
+            resolved = _resolve_env_file(Path(directory), env_file, explicit=True)
+
+        self.assertEqual(resolved, env_file)
+
+
+class CliMainTest(unittest.TestCase):
+    def test_agent_command_dispatches_to_rich_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("AsyncClaw.cli.main.run_agent_cli", return_value=0) as run_agent_cli:
+                exit_code = main(["agent", "--cwd", directory, "--env-file", ".env.test", "--no-shell"])
+
+        self.assertEqual(exit_code, 0)
+        run_agent_cli.assert_called_once_with(
+            cwd=Path(directory),
+            env_file=".env.test",
+            env_file_explicit=True,
+            workspace_root=None,
+            allow_shell_exec=False,
+        )
+
+    def test_agent_command_marks_default_env_file_as_implicit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("AsyncClaw.cli.main.run_agent_cli", return_value=0) as run_agent_cli:
+                exit_code = main(["agent", "--cwd", directory])
+
+        self.assertEqual(exit_code, 0)
+        run_agent_cli.assert_called_once_with(
+            cwd=Path(directory),
+            env_file=".env",
+            env_file_explicit=False,
+            workspace_root=None,
+            allow_shell_exec=True,
+        )
+
+    def test_agent_command_dispatches_explicit_workspace_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace_root = Path(directory) / "state"
+            with patch("AsyncClaw.cli.main.run_agent_cli", return_value=0) as run_agent_cli:
+                exit_code = main(["agent", "--cwd", directory, "--workspace-root", str(workspace_root)])
+
+        self.assertEqual(exit_code, 0)
+        run_agent_cli.assert_called_once_with(
+            cwd=Path(directory),
+            env_file=".env",
+            env_file_explicit=False,
+            workspace_root=workspace_root,
+            allow_shell_exec=True,
+        )
+
+
+class CliInputTest(unittest.TestCase):
+    def test_normalize_user_input_applies_backspace(self) -> None:
+        self.assertEqual(_normalize_user_input("hellp\x7fo"), "hello")
+        self.assertEqual(_normalize_user_input("hellp\bo"), "hello")
+
+    def test_normalize_user_input_strips_ansi_delete_and_arrows(self) -> None:
+        self.assertEqual(_normalize_user_input("hello\x1b[3~"), "hello")
+        self.assertEqual(_normalize_user_input("hello\x1b[D"), "hello")
+
+    def test_normalize_user_input_applies_ctrl_u_line_clear(self) -> None:
+        self.assertEqual(_normalize_user_input("draft\x15final"), "final")
+
+
+if __name__ == "__main__":
+    unittest.main()

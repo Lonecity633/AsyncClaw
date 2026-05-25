@@ -214,6 +214,35 @@ class SaveProfileLLM:
         }
 
 
+class SummaryWorkspaceLLM:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def create_chat_completion(self, **kwargs):
+        self.requests.append(kwargs)
+        if len(self.requests) == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "合并后的近期摘要",
+                        }
+                    }
+                ]
+            }
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "已读取压缩 workspace",
+                    }
+                }
+            ]
+        }
+
+
 class AgentLoopTest(unittest.TestCase):
     def test_runs_tool_call_and_returns_final_answer(self) -> None:
         llm = FakeLLM()
@@ -352,7 +381,9 @@ class AgentLoopTest(unittest.TestCase):
             )
             workspace.save_user_profile("# 用户画像\n- 常用 pyclaw 环境")
             for index in range(12):
-                workspace.append_session_message("user", f"old-{index}")
+                workspace.append_session_turn([
+                    {"role": "user", "content": f"old-{index}"},
+                ])
             agent = AgentLoop(
                 llm,
                 ToolRegistry([]),
@@ -368,13 +399,81 @@ class AgentLoopTest(unittest.TestCase):
         self.assertEqual(result.output, "已读取 workspace")
         self.assertEqual(request_messages[0]["role"], "system")
         self.assertIn("常用 pyclaw 环境", request_messages[0]["content"])
-        self.assertEqual([message["content"] for message in request_messages[1:11]], [
-            f"old-{index}" for index in range(2, 12)
+        self.assertEqual([message["content"] for message in request_messages[1:13]], [
+            f"old-{index}" for index in range(12)
         ])
         self.assertEqual(request_messages[-1], {"role": "user", "content": "你好"})
-        self.assertEqual(session_records[-2]["content"], "你好")
-        self.assertEqual(session_records[-1]["content"], "已读取 workspace")
+        self.assertEqual(session_records[-1]["messages"][0]["content"], "你好")
+        self.assertEqual(session_records[-1]["messages"][-1]["content"], "已读取 workspace")
         self.assertEqual(history_records[-1]["content"], "你好")
+
+    def test_workspace_records_complete_tool_turn(self) -> None:
+        llm = FakeLLM()
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = WorkspaceStore(
+                root=Path(directory) / "workspace",
+                session_id="session-a",
+            )
+            agent = AgentLoop(
+                llm,
+                ToolRegistry([multiply_tool]),
+                workspace=workspace,
+                logger=MemoryLogger(),
+            )
+
+            result = agent.run([{"role": "user", "content": "3 乘以 5 等于多少？"}])
+            turns = workspace.load_session_turns()
+
+        self.assertEqual(result.output, "3 * 5 = 15")
+        self.assertEqual(len(turns), 1)
+        messages = turns[0]["messages"]
+        self.assertEqual([message["role"] for message in messages], [
+            "user",
+            "assistant",
+            "tool",
+            "assistant",
+        ])
+        self.assertEqual(messages[1]["tool_calls"][0]["id"], "call_multiply")
+        self.assertEqual(messages[2]["tool_call_id"], "call_multiply")
+        self.assertEqual(json.loads(messages[2]["content"]), {"product": 15})
+
+    def test_workspace_compacts_history_before_llm_request(self) -> None:
+        llm = SummaryWorkspaceLLM()
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = WorkspaceStore(
+                root=Path(directory) / "workspace",
+                session_id="session-a",
+                summary_threshold=3,
+                recent_turn_limit=1,
+            )
+            workspace.save_short_term_summary("旧摘要")
+            for index in range(3):
+                workspace.append_session_turn([
+                    {"role": "user", "content": f"old-user-{index}"},
+                    {"role": "assistant", "content": f"old-assistant-{index}"},
+                ])
+            agent = AgentLoop(
+                llm,
+                ToolRegistry([]),
+                workspace=workspace,
+                logger=MemoryLogger(),
+            )
+
+            result = agent.run([{"role": "user", "content": "你好"}])
+            summary_request = llm.requests[0]
+            chat_request_messages = llm.requests[1]["messages"]
+            turns = workspace.load_session_turns()
+
+        self.assertEqual(result.output, "已读取压缩 workspace")
+        self.assertNotIn("tools", summary_request)
+        self.assertEqual(chat_request_messages[0]["role"], "system")
+        self.assertEqual(chat_request_messages[1]["role"], "system")
+        self.assertIn("合并后的近期摘要", chat_request_messages[1]["content"])
+        self.assertEqual(chat_request_messages[2]["content"], "old-user-2")
+        self.assertEqual(chat_request_messages[-1]["content"], "你好")
+        self.assertEqual(len(turns), 2)
+        self.assertEqual(turns[0]["messages"][0]["content"], "old-user-2")
+        self.assertEqual(turns[1]["messages"][0]["content"], "你好")
 
     def test_workspace_save_user_profile_tool_overwrites_memory(self) -> None:
         llm = SaveProfileLLM()

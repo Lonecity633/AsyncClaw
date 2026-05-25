@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from AsyncClaw.providers import get_provider
+
 
 @dataclass(frozen=True)
 class LLMConfig:
@@ -15,6 +17,7 @@ class LLMConfig:
     model: str
     base_url: str | None = None
     agent_max_steps: int = 8
+    provider: str = "openai"
 
 
 def load_llm_config(env_file: str | Path = ".env", override: bool = False) -> LLMConfig:
@@ -30,13 +33,38 @@ def load_llm_config(env_file: str | Path = ".env", override: bool = False) -> LL
 
     load_dotenv(dotenv_path=env_file, override=override)
     max_steps = _read_int("AGENT_MAX_STEPS", default=8)
+    provider = get_provider(os.getenv("LLM_PROVIDER"))
 
     return LLMConfig(
-        api_key=os.getenv("OPENAI_API_KEY", ""),
-        base_url=os.getenv("OPENAI_BASE_URL") or None,
-        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        provider=provider.name,
+        api_key=_read_env(
+            provider.api_key_env,
+            *provider.api_key_env_aliases,
+            "LLM_API_KEY",
+        )
+        or "",
+        base_url=_read_env(
+            provider.base_url_env,
+            *provider.base_url_env_aliases,
+            "LLM_BASE_URL",
+        )
+        or provider.base_url,
+        model=_read_env(
+            provider.model_env,
+            *provider.model_env_aliases,
+            "LLM_MODEL",
+        )
+        or provider.default_model,
         agent_max_steps=max_steps,
     )
+
+
+def _read_env(*names: str) -> str | None:
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return None
 
 
 def _read_int(name: str, default: int) -> int:

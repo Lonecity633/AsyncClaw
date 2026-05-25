@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from AsyncClaw.workspace import DEFAULT_SYSTEM_PROMPT, WorkspaceStore
+from AsyncClaw.agent.workspace import DEFAULT_SYSTEM_PROMPT, WorkspaceStore
 
 
 class WorkspaceStoreTest(unittest.TestCase):
@@ -18,21 +19,85 @@ class WorkspaceStoreTest(unittest.TestCase):
             self.assertTrue(workspace.history_dir.is_dir())
             self.assertTrue(workspace.memory_dir.is_dir())
 
-    def test_session_reads_recent_ten_messages(self) -> None:
+    def test_session_reads_all_turns_below_summary_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = WorkspaceStore(
                 root=Path(directory) / "workspace",
                 session_id="session-a",
-                short_term_limit=10,
             )
             for index in range(12):
-                workspace.append_session_message("user", f"message-{index}")
+                workspace.append_session_turn(
+                    [
+                        {"role": "user", "content": f"user-{index}"},
+                        {"role": "assistant", "content": f"assistant-{index}"},
+                    ]
+                )
 
-            messages = workspace.load_recent_messages()
+            messages = workspace.load_context_messages()
 
-        self.assertEqual(len(messages), 10)
-        self.assertEqual(messages[0], {"role": "user", "content": "message-2"})
-        self.assertEqual(messages[-1], {"role": "user", "content": "message-11"})
+        self.assertEqual(len(messages), 24)
+        self.assertEqual(messages[0], {"role": "user", "content": "user-0"})
+        self.assertEqual(messages[-1], {"role": "assistant", "content": "assistant-11"})
+
+    def test_session_compaction_keeps_recent_complete_turns(self) -> None:
+        async def summarize(previous_summary, discarded_turns):
+            self.assertEqual(previous_summary, "旧摘要")
+            self.assertEqual(len(discarded_turns), 2)
+            return "新摘要"
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = WorkspaceStore(
+                root=Path(directory) / "workspace",
+                session_id="session-a",
+                summary_threshold=3,
+                recent_turn_limit=1,
+            )
+            workspace.save_short_term_summary("旧摘要")
+            for index in range(3):
+                workspace.append_session_turn(
+                    [
+                        {"role": "user", "content": f"user-{index}"},
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": f"call-{index}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "multiply",
+                                        "arguments": '{"a": 2, "b": 3}',
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": f"call-{index}",
+                            "name": "multiply",
+                            "content": '{"product": 6}',
+                        },
+                        {"role": "assistant", "content": f"done-{index}"},
+                    ]
+                )
+
+            result = asyncio.run(workspace.compact_session_if_needed(summarize))
+            turns = workspace.load_session_turns()
+            messages = workspace.load_context_messages()
+            summary = workspace.load_short_term_summary()
+
+        self.assertTrue(result["compacted"])
+        self.assertEqual(summary, "新摘要")
+        self.assertEqual(len(turns), 1)
+        self.assertEqual([message["role"] for message in turns[0]["messages"]], [
+            "user",
+            "assistant",
+            "tool",
+            "assistant",
+        ])
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertIn("新摘要", messages[0]["content"])
+        self.assertEqual(messages[1]["content"], "user-2")
 
     def test_history_records_user_inputs_with_session_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

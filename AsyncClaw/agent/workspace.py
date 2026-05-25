@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from inspect import isawaitable
 from pathlib import Path
 from uuid import uuid4
-from typing import Any
+from typing import Any, Callable
 
 
 DEFAULT_SYSTEM_PROMPT = """你是 AsyncClaw 智能体。
@@ -41,7 +43,8 @@ class WorkspaceStore:
 
     root: Path | str = Path("workspace")
     session_id: str | None = None
-    short_term_limit: int = 10
+    summary_threshold: int = 40
+    recent_turn_limit: int = 10
 
     def __post_init__(self) -> None:
         root = Path(self.root).resolve()
@@ -68,6 +71,10 @@ class WorkspaceStore:
         return self.session_dir / f"{self.session_id}.jsonl"
 
     @property
+    def short_term_summary_path(self) -> Path:
+        return self.session_dir / f"{self.session_id}.summary.md"
+
+    @property
     def user_inputs_path(self) -> Path:
         return self.history_dir / "user_inputs.jsonl"
 
@@ -75,25 +82,49 @@ class WorkspaceStore:
     def user_profile_path(self) -> Path:
         return self.memory_dir / "user_profile.md"
 
-    def load_recent_messages(self) -> list[dict[str, Any]]:
+    def load_session_turns(self) -> list[dict[str, Any]]:
         records = self._read_jsonl(self.session_path)
-        messages = [
-            {"role": record["role"], "content": record.get("content")}
-            for record in records
-            if record.get("role") in {"user", "assistant"}
-        ]
-        return messages[-self.short_term_limit :]
+        turns: list[dict[str, Any]] = []
+        for record in records:
+            messages = record.get("messages")
+            if isinstance(messages, list):
+                turns.append(
+                    {
+                        "timestamp": record.get("timestamp") or _utc_now(),
+                        "session_id": record.get("session_id") or self.session_id,
+                        "messages": _copy_messages(messages),
+                    }
+                )
+        return turns
 
-    def append_session_message(self, role: str, content: Any) -> None:
-        if role not in {"user", "assistant"}:
+    def load_context_messages(self) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        summary = self.load_short_term_summary().strip()
+        if summary:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": f"近期对话摘要：\n{summary}",
+                }
+            )
+        for turn in self.load_session_turns():
+            messages.extend(_copy_messages(turn.get("messages") or []))
+        return messages
+
+    def append_session_turn(self, messages: list[dict[str, Any]]) -> None:
+        session_messages = [
+            message
+            for message in _copy_messages(messages)
+            if message.get("role") in {"user", "assistant", "tool"}
+        ]
+        if not session_messages:
             return
         self._append_jsonl(
             self.session_path,
             {
                 "timestamp": _utc_now(),
                 "session_id": self.session_id,
-                "role": role,
-                "content": content,
+                "messages": session_messages,
             },
         )
 
@@ -111,6 +142,56 @@ class WorkspaceStore:
         if not self.user_profile_path.exists():
             return ""
         return self.user_profile_path.read_text(encoding="utf-8")
+
+    def load_short_term_summary(self) -> str:
+        if not self.short_term_summary_path.exists():
+            return ""
+        return self.short_term_summary_path.read_text(encoding="utf-8")
+
+    def save_short_term_summary(self, summary: str) -> dict[str, Any]:
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+        self.short_term_summary_path.write_text(summary, encoding="utf-8")
+        return {
+            "path": str(self.short_term_summary_path),
+            "bytes": len(summary.encode("utf-8")),
+            "saved": True,
+        }
+
+    async def compact_session_if_needed(
+        self,
+        summarizer: Callable[[str, list[dict[str, Any]]], Any],
+    ) -> dict[str, Any]:
+        turns = self.load_session_turns()
+        if len(turns) < self.summary_threshold:
+            return {
+                "compacted": False,
+                "reason": "below_threshold",
+                "turn_count": len(turns),
+            }
+
+        discard_count = max(0, len(turns) - self.recent_turn_limit)
+        if discard_count == 0:
+            return {
+                "compacted": False,
+                "reason": "nothing_to_discard",
+                "turn_count": len(turns),
+            }
+
+        discarded_turns = turns[:discard_count]
+        kept_turns = turns[discard_count:]
+        summary = summarizer(self.load_short_term_summary(), discarded_turns)
+        if isawaitable(summary):
+            summary = await summary
+        if not isinstance(summary, str):
+            raise TypeError("短期摘要生成器必须返回字符串")
+
+        self.save_short_term_summary(summary.strip())
+        self._write_jsonl(self.session_path, kept_turns)
+        return {
+            "compacted": True,
+            "discarded_turns": len(discarded_turns),
+            "kept_turns": len(kept_turns),
+        }
 
     def save_user_profile(self, profile_markdown: str) -> dict[str, Any]:
         self.memory_dir.mkdir(parents=True, exist_ok=True)
@@ -134,6 +215,13 @@ class WorkspaceStore:
             file.write(json.dumps(record, ensure_ascii=False, default=str))
             file.write("\n")
 
+    def _write_jsonl(self, path: Path, records: list[dict[str, Any]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as file:
+            for record in records:
+                file.write(json.dumps(record, ensure_ascii=False, default=str))
+                file.write("\n")
+
     def _read_jsonl(self, path: Path) -> list[dict[str, Any]]:
         if not path.exists():
             return []
@@ -151,3 +239,7 @@ def _new_session_id() -> str:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _copy_messages(messages: list[Any]) -> list[dict[str, Any]]:
+    return [deepcopy(message) for message in messages if isinstance(message, dict)]

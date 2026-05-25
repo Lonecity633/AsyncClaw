@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from copy import deepcopy
 from dataclasses import dataclass, field
 from inspect import isawaitable
@@ -18,7 +19,17 @@ from AsyncClaw.agent.messages import (
 )
 from AsyncClaw.tools import ToolContext, ToolRegistry, create_save_user_profile_tool
 from AsyncClaw.tools.executor import ToolExecutor
-from AsyncClaw.workspace import WorkspaceStore
+from AsyncClaw.agent.workspace import WorkspaceStore
+
+
+SHORT_TERM_SUMMARY_SYSTEM_PROMPT = """你负责维护 AsyncClaw 的近期对话摘要。
+
+请把旧摘要和新丢弃的完整回合合并成一份新的短期摘要。保留：
+- 用户明确目标、偏好、约束和仍然有效的上下文。
+- 已完成或未完成任务的当前状态。
+- 工具调用结果中对后续对话有用的结论。
+
+删除无价值寒暄、重复内容、失败但无后续意义的中间过程。输出 Markdown，内容要紧凑。"""
 
 
 @dataclass
@@ -73,8 +84,9 @@ class AgentLoop:
     async def arun(self, messages: list[dict[str, Any]]) -> AgentResult:
         working_messages = [dict(message) for message in messages]
         observations: list[dict[str, Any]] = []
+        await self._compact_workspace_if_needed()
         short_term_messages = self._load_short_term_messages()
-        self._record_user_messages(working_messages)
+        self._record_user_inputs(working_messages)
         await self._log_user_message(working_messages)
 
         try:
@@ -85,7 +97,7 @@ class AgentLoop:
                 tool_calls = assistant_message.get("tool_calls") or []
                 if not tool_calls:
                     output = assistant_message.get("content")
-                    self._record_assistant_message(output)
+                    self._record_session_turn(working_messages)
                     await self._log("final_answer", {"content": output, "steps": step})
                     return AgentResult(
                         messages=working_messages,
@@ -160,21 +172,76 @@ class AgentLoop:
     def _load_short_term_messages(self) -> list[dict[str, Any]]:
         if self.workspace is None:
             return []
-        return self.workspace.load_recent_messages()
+        return self.workspace.load_context_messages()
 
-    def _record_user_messages(self, messages: list[dict[str, Any]]) -> None:
+    def _record_user_inputs(self, messages: list[dict[str, Any]]) -> None:
         if self.workspace is None:
             return
         for message in messages:
             if message.get("role") == "user":
                 content = message.get("content")
-                self.workspace.append_session_message("user", content)
                 self.workspace.append_user_input(content)
 
-    def _record_assistant_message(self, content: Any) -> None:
+    def _record_session_turn(self, messages: list[dict[str, Any]]) -> None:
         if self.workspace is None:
             return
-        self.workspace.append_session_message("assistant", content)
+        self.workspace.append_session_turn(
+            [message for message in messages if message.get("role") != "system"]
+        )
+
+    async def _compact_workspace_if_needed(self) -> None:
+        if self.workspace is None:
+            return
+        try:
+            result = await self.workspace.compact_session_if_needed(
+                self._summarize_short_term_memory
+            )
+            if result.get("compacted"):
+                await self._log("memory_compacted", result)
+        except Exception as exc:
+            await self._log(
+                "memory_summary_error",
+                {"type": type(exc).__name__, "message": str(exc)},
+            )
+
+    async def _summarize_short_term_memory(
+        self,
+        previous_summary: str,
+        discarded_turns: list[dict[str, Any]],
+    ) -> str:
+        payload = {
+            "previous_summary": previous_summary or "",
+            "discarded_turns": [
+                turn.get("messages") or []
+                for turn in discarded_turns
+            ],
+        }
+        messages = [
+            {
+                "role": "system",
+                "content": SHORT_TERM_SUMMARY_SYSTEM_PROMPT,
+            },
+            {
+                "role": "user",
+                "content": json.dumps(payload, ensure_ascii=False, indent=2),
+            },
+        ]
+        await self._log(
+            "memory_summary_request",
+            {
+                "previous_summary_bytes": len(previous_summary.encode("utf-8")),
+                "discarded_turns": len(discarded_turns),
+            },
+        )
+        response = self.llm.create_chat_completion(messages=messages)
+        response = await _maybe_await(response)
+        message = normalize_assistant_message(response)
+        summary = message.get("content") or ""
+        await self._log(
+            "memory_summary_response",
+            {"summary_bytes": len(summary.encode("utf-8"))},
+        )
+        return summary
 
     async def _act(
         self, tool_calls: list[dict[str, Any]]

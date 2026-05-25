@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from AsyncClaw.tools.spec import Tool
-from AsyncClaw.workspace import WorkspaceStore
+from AsyncClaw.agent.workspace import WorkspaceStore
 
 
 def create_save_user_profile_tool(workspace: WorkspaceStore) -> Tool:

@@ -7,7 +7,7 @@ from typing import Any
 
 from AsyncClaw.tools.context import ToolContext
 from AsyncClaw.tools.spec import Tool
-from AsyncClaw.workspace import WorkspaceStore
+from AsyncClaw.agent.workspace import WorkspaceStore
 
 
 class ToolRegistry:
