@@ -16,10 +16,13 @@ from AsyncClaw.tools import (
     ToolHandler,
     ToolRegistry,
     build_tool_registry,
+    create_save_user_profile_tool,
     current_time_tool,
     multiply_tool,
+    resolve_sandbox_path,
     shell_exec_tool,
 )
+from AsyncClaw.workspace import DEFAULT_SYSTEM_PROMPT, WorkspaceStore
 
 __all__ = [
     "AgentLoop",
@@ -33,10 +36,14 @@ __all__ = [
     "ToolExecutor",
     "ToolHandler",
     "ToolRegistry",
+    "WorkspaceStore",
     "build_tool_registry",
     "create_openai_llm",
+    "create_save_user_profile_tool",
     "current_time_tool",
+    "DEFAULT_SYSTEM_PROMPT",
     "load_llm_config",
     "multiply_tool",
+    "resolve_sandbox_path",
     "shell_exec_tool",
 ]

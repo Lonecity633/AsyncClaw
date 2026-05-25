@@ -22,14 +22,18 @@ def _shell_exec(arguments: dict[str, Any], context: ToolContext | None) -> dict[
     if not context.allow_shell_exec:
         return _blocked_result(command=command, context=context, reason="当前上下文不允许 shell_exec")
 
-    decision = check_shell_command(command)
+    decision = check_shell_command(command, context.sandbox_root)
     if decision.action == "deny":
         return _blocked_result(command=command, context=context, reason=decision.reason)
 
-    approved = decision.action == "allow"
-    if decision.action == "needs_approval":
+    approved = decision.action == "safe"
+    if decision.action == "confirm":
         provider = context.approval_provider or CliApprovalProvider()
-        approved = provider.approve(command=command, cwd=context.cwd, reason=decision.reason)
+        approved = provider.approve(
+            command=command,
+            cwd=context.sandbox_root,
+            reason=decision.reason,
+        )
         if not approved:
             return _blocked_result(
                 command=command,
@@ -51,7 +55,7 @@ def _run_shell_command(
         completed = subprocess.run(
             command,
             shell=True,
-            cwd=context.cwd,
+            cwd=context.sandbox_root,
             capture_output=True,
             text=True,
             timeout=context.shell_timeout_seconds,
@@ -59,7 +63,7 @@ def _run_shell_command(
     except subprocess.TimeoutExpired as exc:
         return {
             "command": command,
-            "cwd": str(context.cwd),
+            "cwd": str(context.sandbox_root),
             "exit_code": None,
             "stdout": _limit_text(_coerce_output(exc.stdout), context.shell_output_limit_bytes),
             "stderr": _limit_text(_coerce_output(exc.stderr), context.shell_output_limit_bytes),
@@ -71,7 +75,7 @@ def _run_shell_command(
 
     return {
         "command": command,
-        "cwd": str(context.cwd),
+        "cwd": str(context.sandbox_root),
         "exit_code": completed.returncode,
         "stdout": _limit_text(completed.stdout, context.shell_output_limit_bytes),
         "stderr": _limit_text(completed.stderr, context.shell_output_limit_bytes),
@@ -91,7 +95,7 @@ def _blocked_result(
 ) -> dict[str, Any]:
     return {
         "command": command,
-        "cwd": str(context.cwd) if context else None,
+        "cwd": str(context.sandbox_root) if context else None,
         "exit_code": None,
         "stdout": "",
         "stderr": "",

@@ -7,7 +7,15 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
-from AsyncClaw import AgentLoop, JsonlEventLogger, Tool, ToolRegistry, current_time_tool, multiply_tool
+from AsyncClaw import (
+    AgentLoop,
+    JsonlEventLogger,
+    Tool,
+    ToolRegistry,
+    WorkspaceStore,
+    current_time_tool,
+    multiply_tool,
+)
 
 
 class FakeLLM:
@@ -147,6 +155,65 @@ class BrokenLogger:
         raise RuntimeError("日志失败")
 
 
+class WorkspaceLLM:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def create_chat_completion(self, **kwargs):
+        self.requests.append(kwargs)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "已读取 workspace",
+                    }
+                }
+            ]
+        }
+
+
+class SaveProfileLLM:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def create_chat_completion(self, **kwargs):
+        self.requests.append(kwargs)
+        if len(self.requests) == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_save_profile",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "save_user_profile",
+                                        "arguments": json.dumps(
+                                            {"profile_markdown": "# 用户画像\n- 喜欢 Python"}
+                                        ),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "记住了",
+                    }
+                }
+            ]
+        }
+
+
 class AgentLoopTest(unittest.TestCase):
     def test_runs_tool_call_and_returns_final_answer(self) -> None:
         llm = FakeLLM()
@@ -275,6 +342,88 @@ class AgentLoopTest(unittest.TestCase):
         self.assertEqual(records[-1]["event"], "error")
         self.assertEqual(records[-1]["data"]["type"], "RuntimeError")
         self.assertEqual(records[-1]["data"]["message"], "llm 调用失败")
+
+    def test_workspace_injects_system_profile_and_recent_messages(self) -> None:
+        llm = WorkspaceLLM()
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = WorkspaceStore(
+                root=Path(directory) / "workspace",
+                session_id="session-a",
+            )
+            workspace.save_user_profile("# 用户画像\n- 常用 pyclaw 环境")
+            for index in range(12):
+                workspace.append_session_message("user", f"old-{index}")
+            agent = AgentLoop(
+                llm,
+                ToolRegistry([]),
+                workspace=workspace,
+                logger=MemoryLogger(),
+            )
+
+            result = agent.run([{"role": "user", "content": "你好"}])
+            request_messages = llm.requests[0]["messages"]
+            session_records = _read_jsonl(workspace.session_path)
+            history_records = _read_jsonl(workspace.user_inputs_path)
+
+        self.assertEqual(result.output, "已读取 workspace")
+        self.assertEqual(request_messages[0]["role"], "system")
+        self.assertIn("常用 pyclaw 环境", request_messages[0]["content"])
+        self.assertEqual([message["content"] for message in request_messages[1:11]], [
+            f"old-{index}" for index in range(2, 12)
+        ])
+        self.assertEqual(request_messages[-1], {"role": "user", "content": "你好"})
+        self.assertEqual(session_records[-2]["content"], "你好")
+        self.assertEqual(session_records[-1]["content"], "已读取 workspace")
+        self.assertEqual(history_records[-1]["content"], "你好")
+
+    def test_workspace_save_user_profile_tool_overwrites_memory(self) -> None:
+        llm = SaveProfileLLM()
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = WorkspaceStore(
+                root=Path(directory) / "workspace",
+                session_id="session-a",
+            )
+            agent = AgentLoop(
+                llm,
+                ToolRegistry([]),
+                workspace=workspace,
+                logger=MemoryLogger(),
+            )
+
+            result = agent.run([{"role": "user", "content": "我喜欢 Python"}])
+            tool_names = [
+                tool["function"]["name"]
+                for tool in llm.requests[0]["tools"]
+            ]
+            profile = workspace.load_user_profile()
+
+        self.assertEqual(result.output, "记住了")
+        self.assertIn("save_user_profile", tool_names)
+        self.assertEqual(profile, "# 用户画像\n- 喜欢 Python")
+
+    def test_workspace_prompt_guides_model_to_decide_memory_use(self) -> None:
+        llm = WorkspaceLLM()
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = WorkspaceStore(
+                root=Path(directory) / "workspace",
+                session_id="session-a",
+            )
+            agent = AgentLoop(
+                llm,
+                ToolRegistry([]),
+                workspace=workspace,
+                logger=MemoryLogger(),
+            )
+
+            agent.run([
+                {"role": "user", "content": "我喜欢打篮球， 玩游戏，我 是学计算机的，你呢？"}
+            ])
+            system_prompt = llm.requests[0]["messages"][0]["content"]
+
+        self.assertIn("save_user_profile", system_prompt)
+        self.assertIn("稳定偏好和兴趣", system_prompt)
+        self.assertIn("稳定身份背景", system_prompt)
+        self.assertIn("如果需要记录", system_prompt)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, object]]:

@@ -11,7 +11,9 @@
 - `AsyncClaw.tools.ToolRegistry`：注册工具，并暴露 OpenAI `tools` schema。
 - `AsyncClaw.tools.ToolExecutor`：统一执行工具，并将工具异常转换成结构化观察结果。
 - `AsyncClaw.tools.ToolContext`：描述单次运行的工具能力和执行边界。
+- `AsyncClaw.tools.resolve_sandbox_path`：解析并校验软沙箱内路径，禁止越界访问。
 - `AsyncClaw.tools.shell_exec_tool`：可选的本地 shell 工具，仅在 `ToolContext` 允许时暴露。
+- `AsyncClaw.workspace.WorkspaceStore`：在 `workspace/` 中存储会话、用户输入历史和长期用户画像。
 - `AsyncClaw.tools.multiply_tool`：最简单的示例工具，用于计算两个数字的乘积。
 - `AsyncClaw.tools.current_time_tool`：返回当前本地日期和时间。
 
@@ -66,6 +68,8 @@ tool_context = ToolContext(cwd=Path.cwd(), allow_shell_exec=True)
 tools = build_tool_registry(tool_context)
 ```
 
+默认情况下，`ToolContext` 会把软沙箱根目录设为 `Path.cwd() / "workspace" / "office"`，并自动创建该目录。`shell_exec` 即使收到其他 `cwd`，也只会在这个 `sandbox_root` 中执行。
+
 将同一个上下文传入 `AgentLoop`：
 
 ```python
@@ -76,7 +80,27 @@ agent = AgentLoop(
 )
 ```
 
-当 `shell_exec` 被调用时，会先执行安全检查，拒绝明显破坏性的命令，对未知命令请求 CLI 审批，并在 `ToolContext.cwd` 中执行已批准命令。默认超时时间为 10 秒，stdout/stderr 分别截断到 16 KB。
+当 `shell_exec` 被调用时，会先执行软沙箱安全检查：
+
+- `safe`：只读环境诊断命令可直接执行，例如 `pwd`、`ls`、`python --version`、`conda --version`、`conda env list`、`which python`、`which conda`，以及简单只读管道。
+- `confirm`：删除、覆盖、安装依赖、网络访问、git 修改、长时间运行等命令需要 CLI 审批。
+- `deny`：绝对路径、`..`、`~`、敏感文件、office 外路径、`python -c`、`node -e` 等绕过沙箱的方式会直接拒绝。
+
+默认超时时间为 10 秒，stdout/stderr 分别截断到 16 KB。这个机制是应用层软限制，不等同于操作系统或容器级隔离。
+
+## Workspace 记忆
+
+CLI 默认启用 `WorkspaceStore`，数据写入：
+
+```text
+workspace/session/{session_id}.jsonl
+workspace/history/user_inputs.jsonl
+workspace/memory/user_profile.md
+```
+
+每次运行 CLI 会自动生成一个 `session_id`。同一会话内的用户输入和助手最终回答写入 session；所有用户输入同时写入全局 history。每轮请求会把当前 `user_profile.md` 和最近 10 条 session 消息注入给 LLM。
+
+启用 workspace 时会暴露 `save_user_profile` 工具。模型判断用户消息包含长期信息时，可以调用该工具并传入完整 Markdown 用户画像，工具会覆盖写入 `workspace/memory/user_profile.md`。
 
 ## 配置真实 API
 

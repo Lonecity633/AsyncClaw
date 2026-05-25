@@ -14,6 +14,7 @@ class ToolContext:
     """单次智能体运行的能力与执行边界。"""
 
     cwd: Path
+    sandbox_root: Path | None = None
     allow_shell_exec: bool = False
     approval_mode: Literal["dangerous_only"] = "dangerous_only"
     shell_timeout_seconds: int = 10
@@ -21,4 +22,13 @@ class ToolContext:
     approval_provider: ApprovalProvider | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "cwd", Path(self.cwd).resolve())
+        cwd = Path(self.cwd).resolve()
+        sandbox_root = (
+            Path(self.sandbox_root)
+            if self.sandbox_root is not None
+            else cwd / "workspace" / "office"
+        )
+        sandbox_root = sandbox_root.resolve()
+        sandbox_root.mkdir(parents=True, exist_ok=True)
+        object.__setattr__(self, "cwd", cwd)
+        object.__setattr__(self, "sandbox_root", sandbox_root)

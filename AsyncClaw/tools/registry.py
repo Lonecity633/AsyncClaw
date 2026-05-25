@@ -7,6 +7,7 @@ from typing import Any
 
 from AsyncClaw.tools.context import ToolContext
 from AsyncClaw.tools.spec import Tool
+from AsyncClaw.workspace import WorkspaceStore
 
 
 class ToolRegistry:
@@ -21,6 +22,9 @@ class ToolRegistry:
         if tool.name in self._tools:
             raise ValueError(f"工具已注册：{tool.name}")
         self._tools[tool.name] = tool
+
+    def has(self, name: str) -> bool:
+        return name in self._tools
 
     def get(self, name: str) -> Tool:
         try:
@@ -48,15 +52,21 @@ class ToolRegistry:
         return [tool.to_openai_tool() for tool in self._tools.values()]
 
 
-def build_tool_registry(context: ToolContext | None = None) -> ToolRegistry:
+def build_tool_registry(
+    context: ToolContext | None = None,
+    workspace: WorkspaceStore | None = None,
+) -> ToolRegistry:
     """构造单次智能体运行可见的工具集合。"""
 
     from AsyncClaw.tools.builtin.math import multiply_tool
+    from AsyncClaw.tools.builtin.memory import create_save_user_profile_tool
     from AsyncClaw.tools.builtin.shell import shell_exec_tool
     from AsyncClaw.tools.builtin.time import current_time_tool
 
     context = context or ToolContext(cwd=Path.cwd())
     tools = [multiply_tool, current_time_tool]
+    if workspace is not None:
+        tools.append(create_save_user_profile_tool(workspace))
     if context.allow_shell_exec:
         tools.append(shell_exec_tool)
     return ToolRegistry(tools)

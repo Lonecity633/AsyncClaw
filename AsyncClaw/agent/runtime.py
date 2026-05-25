@@ -16,8 +16,9 @@ from AsyncClaw.agent.messages import (
     normalize_assistant_message,
     normalize_tool_call,
 )
-from AsyncClaw.tools import ToolContext, ToolRegistry
+from AsyncClaw.tools import ToolContext, ToolRegistry, create_save_user_profile_tool
 from AsyncClaw.tools.executor import ToolExecutor
+from AsyncClaw.workspace import WorkspaceStore
 
 
 @dataclass
@@ -42,6 +43,8 @@ class AgentLoop:
         logger: EventLogger | None = None,
         tool_context: ToolContext | None = None,
         tool_executor: ToolExecutor | None = None,
+        workspace: WorkspaceStore | None = None,
+        system_prompt: str | None = None,
     ):
         self.llm = llm
         self.tools = tools
@@ -49,6 +52,10 @@ class AgentLoop:
         self.tool_choice = tool_choice
         self.logger = logger if logger is not None else JsonlEventLogger()
         self.tool_context = tool_context
+        self.workspace = workspace
+        self.system_prompt = system_prompt
+        if self.workspace is not None and not self.tools.has("save_user_profile"):
+            self.tools.register(create_save_user_profile_tool(self.workspace))
         self.tool_executor = tool_executor or ToolExecutor(tools)
 
     def run(self, messages: list[dict[str, Any]]) -> AgentResult:
@@ -66,16 +73,19 @@ class AgentLoop:
     async def arun(self, messages: list[dict[str, Any]]) -> AgentResult:
         working_messages = [dict(message) for message in messages]
         observations: list[dict[str, Any]] = []
+        short_term_messages = self._load_short_term_messages()
+        self._record_user_messages(working_messages)
         await self._log_user_message(working_messages)
 
         try:
             for step in range(1, self.max_steps + 1):
-                assistant_message = await self._reason(working_messages)
+                assistant_message = await self._reason(working_messages, short_term_messages)
                 working_messages.append(assistant_message)
 
                 tool_calls = assistant_message.get("tool_calls") or []
                 if not tool_calls:
                     output = assistant_message.get("content")
+                    self._record_assistant_message(output)
                     await self._log("final_answer", {"content": output, "steps": step})
                     return AgentResult(
                         messages=working_messages,
@@ -93,10 +103,15 @@ class AgentLoop:
             await self._log("error", {"type": type(exc).__name__, "message": str(exc)})
             raise
 
-    async def _reason(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    async def _reason(
+        self,
+        messages: list[dict[str, Any]],
+        short_term_messages: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         tools = self.tools.to_openai_tools()
+        llm_messages = self._build_llm_messages(messages, short_term_messages or [])
         request = {
-            "messages": deepcopy(messages),
+            "messages": llm_messages,
             "tools": tools,
             "tool_choice": self.tool_choice,
         }
@@ -110,6 +125,56 @@ class AgentLoop:
         message = normalize_assistant_message(response)
         await self._log("llm_response", {"message": message})
         return message
+
+    def _build_llm_messages(
+        self,
+        messages: list[dict[str, Any]],
+        short_term_messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if self.workspace is None:
+            return deepcopy(messages)
+
+        system_prompt = self._build_system_prompt(messages)
+        llm_messages = [{"role": "system", "content": system_prompt}]
+        llm_messages.extend(deepcopy(short_term_messages))
+        llm_messages.extend(
+            deepcopy([message for message in messages if message.get("role") != "system"])
+        )
+        return llm_messages
+
+    def _build_system_prompt(self, messages: list[dict[str, Any]]) -> str:
+        if self.workspace is None:
+            return self.system_prompt or ""
+
+        prompt_parts = []
+        if self.system_prompt:
+            prompt_parts.append(self.system_prompt)
+        prompt_parts.extend(
+            str(message.get("content"))
+            for message in messages
+            if message.get("role") == "system" and message.get("content")
+        )
+        base_prompt = "\n\n".join(prompt_parts) if prompt_parts else None
+        return self.workspace.build_system_prompt(base_prompt)
+
+    def _load_short_term_messages(self) -> list[dict[str, Any]]:
+        if self.workspace is None:
+            return []
+        return self.workspace.load_recent_messages()
+
+    def _record_user_messages(self, messages: list[dict[str, Any]]) -> None:
+        if self.workspace is None:
+            return
+        for message in messages:
+            if message.get("role") == "user":
+                content = message.get("content")
+                self.workspace.append_session_message("user", content)
+                self.workspace.append_user_input(content)
+
+    def _record_assistant_message(self, content: Any) -> None:
+        if self.workspace is None:
+            return
+        self.workspace.append_session_message("assistant", content)
 
     async def _act(
         self, tool_calls: list[dict[str, Any]]
