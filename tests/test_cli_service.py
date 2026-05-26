@@ -4,6 +4,7 @@ import io
 import json
 import tempfile
 import unittest
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,7 +16,12 @@ from AsyncClaw.agent.workspace import WorkspaceStore
 from AsyncClaw.cli.main import main
 from AsyncClaw.config import LLMConfig
 from AsyncClaw.channels.service import _resolve_env_file
-from AsyncClaw.cli.agent import _normalize_user_input, _render_cron_start
+from AsyncClaw.cli.agent import (
+    _normalize_user_input,
+    _patch_stdout_context,
+    _read_user_text,
+    _render_cron_start,
+)
 
 
 class SimpleLLM:
@@ -327,6 +333,7 @@ class CliMainTest(unittest.TestCase):
             workspace_root=None,
             allow_shell_exec=False,
             allow_cron=True,
+            cron_max_concurrent_jobs=2,
         )
 
     def test_agent_command_marks_default_env_file_as_implicit(self) -> None:
@@ -342,6 +349,7 @@ class CliMainTest(unittest.TestCase):
             workspace_root=None,
             allow_shell_exec=True,
             allow_cron=True,
+            cron_max_concurrent_jobs=2,
         )
 
     def test_agent_command_dispatches_explicit_workspace_root(self) -> None:
@@ -358,6 +366,7 @@ class CliMainTest(unittest.TestCase):
             workspace_root=workspace_root,
             allow_shell_exec=True,
             allow_cron=True,
+            cron_max_concurrent_jobs=2,
         )
 
     def test_agent_command_can_disable_cron(self) -> None:
@@ -373,6 +382,25 @@ class CliMainTest(unittest.TestCase):
             workspace_root=None,
             allow_shell_exec=True,
             allow_cron=False,
+            cron_max_concurrent_jobs=2,
+        )
+
+    def test_agent_command_passes_cron_concurrency_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("AsyncClaw.cli.main.run_agent_cli", return_value=0) as run_agent_cli:
+                exit_code = main(
+                    ["agent", "--cwd", directory, "--cron-max-concurrent-jobs", "4"]
+                )
+
+        self.assertEqual(exit_code, 0)
+        run_agent_cli.assert_called_once_with(
+            cwd=Path(directory),
+            env_file=".env",
+            env_file_explicit=False,
+            workspace_root=None,
+            allow_shell_exec=True,
+            allow_cron=True,
+            cron_max_concurrent_jobs=4,
         )
 
 
@@ -387,6 +415,99 @@ class CliInputTest(unittest.TestCase):
 
     def test_normalize_user_input_applies_ctrl_u_line_clear(self) -> None:
         self.assertEqual(_normalize_user_input("draft\x15final"), "final")
+
+    def test_read_user_text_uses_prompt_session_and_normalizes(self) -> None:
+        class FakePromptSession:
+            def __init__(self) -> None:
+                self.prompts = []
+
+            def prompt(self, prompt: str) -> str:
+                self.prompts.append(prompt)
+                return "hellp\x7fo\n"
+
+        session = FakePromptSession()
+        console = Console(file=io.StringIO(), record=True)
+
+        text = _read_user_text(console, session=session)
+
+        self.assertEqual(text, "hello")
+        self.assertEqual(session.prompts, ["用户: "])
+
+    def test_read_user_text_patches_stdout_in_raw_mode(self) -> None:
+        class FakePromptSession:
+            def prompt(self, prompt: str) -> str:
+                return "hello"
+
+        calls = []
+
+        @contextmanager
+        def fake_patch_stdout(**kwargs):
+            calls.append(kwargs)
+            yield
+
+        console = Console(file=io.StringIO(), record=True)
+        with patch("AsyncClaw.cli.agent.patch_stdout", fake_patch_stdout):
+            text = _read_user_text(console, session=FakePromptSession())
+
+        self.assertEqual(text, "hello")
+        self.assertEqual(calls, [{"raw": True}])
+
+    def test_read_user_text_internal_session_patches_stdout_in_raw_mode(self) -> None:
+        class FakePromptSession:
+            def prompt(self, prompt: str) -> str:
+                return "hello"
+
+        calls = []
+
+        @contextmanager
+        def fake_patch_stdout(**kwargs):
+            calls.append(kwargs)
+            yield
+
+        console = Console(file=io.StringIO(), record=True)
+        with patch("AsyncClaw.cli.agent.PromptSession", FakePromptSession):
+            with patch("AsyncClaw.cli.agent.patch_stdout", fake_patch_stdout):
+                text = _read_user_text(console)
+
+        self.assertEqual(text, "hello")
+        self.assertEqual(calls, [{"raw": True}])
+
+    def test_patch_stdout_context_falls_back_when_raw_is_unsupported(self) -> None:
+        calls = []
+
+        def fake_patch_stdout(*args, **kwargs):
+            calls.append(kwargs)
+            if kwargs:
+                raise TypeError("raw is not supported")
+            return nullcontext()
+
+        with patch("AsyncClaw.cli.agent.patch_stdout", fake_patch_stdout):
+            with _patch_stdout_context():
+                pass
+
+        self.assertEqual(calls, [{"raw": True}, {}])
+
+    def test_prompt_toolkit_non_raw_output_replaces_escape_character(self) -> None:
+        from prompt_toolkit.output.vt100 import Vt100_Output
+
+        class FakeStdout:
+            def __init__(self) -> None:
+                self.encoding = "utf-8"
+                self.buffer = None
+
+            def write(self, text: str) -> int:
+                return len(text)
+
+            def flush(self) -> None:
+                pass
+
+            def isatty(self) -> bool:
+                return True
+
+        output = Vt100_Output(FakeStdout(), get_size=lambda: None)
+        output.write("\x1b[35m")
+
+        self.assertIn("?[35m", "".join(output._buffer))
 
 
 class CliCronRenderTest(unittest.TestCase):
@@ -416,6 +537,14 @@ class CliCronRenderTest(unittest.TestCase):
         self.assertIn("当前时间任务", output)
         self.assertIn("正在执行", output)
         self.assertNotIn("输出当前时间", output)
+
+    def test_prompt_toolkit_dependency_is_declared(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+        requirements = (root / "requirements.txt").read_text(encoding="utf-8")
+
+        self.assertIn("prompt_toolkit>=3.0", pyproject)
+        self.assertIn("prompt_toolkit>=3.0", requirements)
 
 
 if __name__ == "__main__":

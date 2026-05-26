@@ -7,7 +7,7 @@ import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, ClassVar
 from uuid import uuid4
 
 from AsyncClaw.agent.workspace import WorkspaceStore
@@ -59,6 +59,8 @@ class CronStore:
     """JSON-backed store for scheduled jobs."""
 
     version = 1
+    _locks_guard: ClassVar[threading.Lock] = threading.Lock()
+    _locks: ClassVar[dict[str, threading.RLock]] = {}
 
     def __init__(self, workspace: WorkspaceStore | str | Path):
         if isinstance(workspace, WorkspaceStore):
@@ -66,14 +68,26 @@ class CronStore:
         else:
             self.path = Path(workspace)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = self._lock_for_path(self.path)
+
+    @classmethod
+    def _lock_for_path(cls, path: Path) -> threading.RLock:
+        key = str(path.resolve())
+        with cls._locks_guard:
+            lock = cls._locks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                cls._locks[key] = lock
+            return lock
 
     def list_jobs(self) -> list[CronJob]:
-        payload = self._read_payload()
-        return [
-            CronJob.from_dict(job)
-            for job in payload.get("jobs", [])
-            if isinstance(job, dict)
-        ]
+        with self._lock:
+            payload = self._read_payload()
+            return [
+                CronJob.from_dict(job)
+                for job in payload.get("jobs", [])
+                if isinstance(job, dict)
+            ]
 
     def create_job(
         self,
@@ -115,42 +129,70 @@ class CronStore:
             last_error=None,
             running=False,
         )
-        jobs = self.list_jobs()
-        jobs.append(job)
-        self._write_jobs(jobs)
+        with self._lock:
+            jobs = self.list_jobs()
+            jobs.append(job)
+            self._write_jobs(jobs)
         return job
 
     def delete_job(self, job_id: str) -> bool:
-        jobs = self.list_jobs()
-        kept = [job for job in jobs if job.id != job_id]
-        deleted = len(kept) != len(jobs)
-        if deleted:
-            self._write_jobs(kept)
-        return deleted
+        with self._lock:
+            jobs = self.list_jobs()
+            kept = [job for job in jobs if job.id != job_id]
+            deleted = len(kept) != len(jobs)
+            if deleted:
+                self._write_jobs(kept)
+            return deleted
 
     def due_jobs(self, now: datetime | None = None) -> list[CronJob]:
-        now = now or _utc_datetime()
-        due: list[CronJob] = []
-        for job in self.list_jobs():
-            if not job.enabled or job.running or not job.next_run_at:
-                continue
-            next_run_at = _parse_datetime(job.next_run_at)
-            if next_run_at <= now:
-                due.append(job)
-        return due
+        with self._lock:
+            now = now or _utc_datetime()
+            due: list[CronJob] = []
+            for job in self.list_jobs():
+                if _is_due(job, now):
+                    due.append(job)
+            return due
+
+    def claim_due_jobs(
+        self,
+        now: datetime | None = None,
+        *,
+        limit: int | None = None,
+    ) -> list[CronJob]:
+        """Atomically mark due jobs as running and return the claimed jobs."""
+
+        if limit is not None and limit <= 0:
+            return []
+        with self._lock:
+            now = now or _utc_datetime()
+            jobs = self.list_jobs()
+            claimed: list[CronJob] = []
+            timestamp = _format_datetime(now)
+            for job in jobs:
+                if limit is not None and len(claimed) >= limit:
+                    break
+                if not _is_due(job, now):
+                    continue
+                job.running = True
+                job.updated_at = timestamp
+                claimed.append(job)
+            if claimed:
+                self._write_jobs(jobs)
+            return claimed
 
     def mark_running(self, job_id: str, running: bool = True) -> CronJob | None:
-        now = _utc_now()
-        jobs = self.list_jobs()
-        updated: CronJob | None = None
-        for job in jobs:
-            if job.id == job_id:
-                job.running = running
-                job.updated_at = now
-                updated = job
-                break
-        self._write_jobs(jobs)
-        return updated
+        with self._lock:
+            now = _utc_now()
+            jobs = self.list_jobs()
+            updated: CronJob | None = None
+            for job in jobs:
+                if job.id == job_id:
+                    job.running = running
+                    job.updated_at = now
+                    updated = job
+                    break
+            self._write_jobs(jobs)
+            return updated
 
     def reset_running_jobs(
         self,
@@ -158,38 +200,40 @@ class CronStore:
         error: str = "任务在上次运行中断后恢复为待执行状态",
         now: datetime | None = None,
     ) -> list[CronJob]:
-        timestamp = _format_datetime(now or _utc_datetime())
-        jobs = self.list_jobs()
-        updated: list[CronJob] = []
-        for job in jobs:
-            if job.running:
-                job.running = False
-                job.updated_at = timestamp
-                job.last_error = error
-                updated.append(job)
-        if updated:
-            self._write_jobs(jobs)
-        return updated
+        with self._lock:
+            timestamp = _format_datetime(now or _utc_datetime())
+            jobs = self.list_jobs()
+            updated: list[CronJob] = []
+            for job in jobs:
+                if job.running:
+                    job.running = False
+                    job.updated_at = timestamp
+                    job.last_error = error
+                    updated.append(job)
+            if updated:
+                self._write_jobs(jobs)
+            return updated
 
     def mark_success(self, job_id: str, now: datetime | None = None) -> CronJob | None:
-        now = now or _utc_datetime()
-        timestamp = _format_datetime(now)
-        jobs = self.list_jobs()
-        updated: CronJob | None = None
-        for job in jobs:
-            if job.id == job_id:
-                job.running = False
-                job.last_run_at = timestamp
-                job.updated_at = timestamp
-                job.run_count += 1
-                job.last_error = None
-                job.next_run_at = _next_after_run(job.schedule, now)
-                if job.schedule.get("type") == "at":
-                    job.enabled = False
-                updated = job
-                break
-        self._write_jobs(jobs)
-        return updated
+        with self._lock:
+            now = now or _utc_datetime()
+            timestamp = _format_datetime(now)
+            jobs = self.list_jobs()
+            updated: CronJob | None = None
+            for job in jobs:
+                if job.id == job_id:
+                    job.running = False
+                    job.last_run_at = timestamp
+                    job.updated_at = timestamp
+                    job.run_count += 1
+                    job.last_error = None
+                    job.next_run_at = _next_after_run(job.schedule, now)
+                    if job.schedule.get("type") == "at":
+                        job.enabled = False
+                    updated = job
+                    break
+            self._write_jobs(jobs)
+            return updated
 
     def mark_failure(
         self,
@@ -197,24 +241,25 @@ class CronStore:
         error: str,
         now: datetime | None = None,
     ) -> CronJob | None:
-        now = now or _utc_datetime()
-        timestamp = _format_datetime(now)
-        jobs = self.list_jobs()
-        updated: CronJob | None = None
-        for job in jobs:
-            if job.id == job_id:
-                job.running = False
-                job.last_run_at = timestamp
-                job.updated_at = timestamp
-                job.failure_count += 1
-                job.last_error = error
-                job.next_run_at = _next_after_run(job.schedule, now)
-                if job.schedule.get("type") == "at":
-                    job.enabled = False
-                updated = job
-                break
-        self._write_jobs(jobs)
-        return updated
+        with self._lock:
+            now = now or _utc_datetime()
+            timestamp = _format_datetime(now)
+            jobs = self.list_jobs()
+            updated: CronJob | None = None
+            for job in jobs:
+                if job.id == job_id:
+                    job.running = False
+                    job.last_run_at = timestamp
+                    job.updated_at = timestamp
+                    job.failure_count += 1
+                    job.last_error = error
+                    job.next_run_at = _next_after_run(job.schedule, now)
+                    if job.schedule.get("type") == "at":
+                        job.enabled = False
+                    updated = job
+                    break
+            self._write_jobs(jobs)
+            return updated
 
     def _read_payload(self) -> dict[str, Any]:
         if not self.path.exists():
@@ -251,18 +296,24 @@ class CronService:
         service: Any,
         store: CronStore,
         interval_seconds: float = 1.0,
+        max_concurrent_jobs: int = 2,
         logger: Any | None = None,
         on_job_start: Callable[[CronJob], None] | None = None,
         on_job_result: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
+        if max_concurrent_jobs <= 0:
+            raise ValueError("max_concurrent_jobs 必须是正整数")
         self.service = service
         self.store = store
         self.interval_seconds = interval_seconds
+        self.max_concurrent_jobs = max_concurrent_jobs
         self.logger = logger
         self.on_job_start = on_job_start
         self.on_job_result = on_job_result
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._workers_lock = threading.RLock()
+        self._workers: set[threading.Thread] = set()
 
     @property
     def running(self) -> bool:
@@ -290,17 +341,26 @@ class CronService:
         if self._thread is not None:
             self._thread.join(timeout=timeout)
             self._thread = None
+        self._join_workers(timeout)
 
-    def tick(self, now: datetime | None = None) -> list[dict[str, Any]]:
-        results = []
-        for job in self.store.due_jobs(now):
-            results.append(self._run_job(job, now=now))
-        return results
+    def tick(
+        self,
+        now: datetime | None = None,
+        *,
+        wait: bool = True,
+    ) -> list[dict[str, Any]]:
+        self._prune_workers()
+        capacity = self._available_capacity()
+        jobs = self.store.claim_due_jobs(now, limit=capacity)
+        if wait:
+            return self._run_jobs_and_wait(jobs, now=now)
+        self._start_workers(jobs, now=now)
+        return []
 
     def _run_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                self.tick()
+                self.tick(wait=False)
             except Exception as exc:
                 self._log(
                     "cron_tick_error",
@@ -309,12 +369,14 @@ class CronService:
             self._stop.wait(self.interval_seconds)
 
     def _run_job(self, job: CronJob, now: datetime | None = None) -> dict[str, Any]:
-        self.store.mark_running(job.id, True)
         self._log("cron_job_start", {"id": job.id, "name": job.name})
         self._notify_job_start(job)
 
         try:
-            response = self.service.handle_text(_build_agent_job_prompt(job))
+            if hasattr(self.service, "handle_cron_text"):
+                response = self.service.handle_cron_text(job)
+            else:
+                response = self.service.handle_text(_build_agent_job_prompt(job))
         except Exception as exc:
             error = str(exc)
             updated = self.store.mark_failure(job.id, error, now=now)
@@ -342,6 +404,86 @@ class CronService:
         self._log("cron_job_result", result)
         self._notify_job_result(result)
         return result
+
+    def _run_jobs_and_wait(
+        self,
+        jobs: list[CronJob],
+        *,
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        if not jobs:
+            return []
+        if len(jobs) == 1:
+            return [self._run_job(jobs[0], now=now)]
+
+        results: list[dict[str, Any]] = []
+        results_lock = threading.Lock()
+        threads = [
+            threading.Thread(
+                target=self._run_job_for_results,
+                args=(job, results, results_lock, now),
+                name=f"asyncclaw-cron-sync-{job.id[:8]}",
+                daemon=True,
+            )
+            for job in jobs
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        return results
+
+    def _run_job_for_results(
+        self,
+        job: CronJob,
+        results: list[dict[str, Any]],
+        results_lock: threading.Lock,
+        now: datetime | None,
+    ) -> None:
+        result = self._run_job(job, now=now)
+        with results_lock:
+            results.append(result)
+
+    def _start_workers(
+        self,
+        jobs: list[CronJob],
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        for job in jobs:
+            thread = threading.Thread(
+                target=self._run_worker,
+                args=(job, now),
+                name=f"asyncclaw-cron-job-{job.id[:8]}",
+                daemon=True,
+            )
+            with self._workers_lock:
+                self._workers.add(thread)
+            thread.start()
+
+    def _run_worker(self, job: CronJob, now: datetime | None) -> None:
+        thread = threading.current_thread()
+        try:
+            self._run_job(job, now=now)
+        finally:
+            with self._workers_lock:
+                self._workers.discard(thread)
+
+    def _available_capacity(self) -> int:
+        with self._workers_lock:
+            active = sum(1 for worker in self._workers if worker.is_alive())
+        return max(0, self.max_concurrent_jobs - active)
+
+    def _prune_workers(self) -> None:
+        with self._workers_lock:
+            self._workers = {worker for worker in self._workers if worker.is_alive()}
+
+    def _join_workers(self, timeout: float | None) -> None:
+        with self._workers_lock:
+            workers = list(self._workers)
+        for worker in workers:
+            worker.join(timeout=timeout)
+        self._prune_workers()
 
     def _notify_job_start(self, job: CronJob) -> None:
         if self.on_job_start is None:
@@ -393,6 +535,13 @@ def _normalize_schedule(schedule: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("every 任务 seconds 必须是正整数")
         return {"type": "every", "seconds": seconds}
     raise ValueError("schedule.type 仅支持 at 或 every")
+
+
+def _is_due(job: CronJob, now: datetime) -> bool:
+    if not job.enabled or job.running or not job.next_run_at:
+        return False
+    next_run_at = _parse_datetime(job.next_run_at)
+    return next_run_at <= now
 
 
 def _build_agent_job_prompt(job: CronJob) -> str:

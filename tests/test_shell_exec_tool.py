@@ -142,6 +142,7 @@ class ShellExecToolTest(unittest.TestCase):
                 "python --version",
                 "conda --version",
                 "conda env list",
+                "conda info --envs",
                 "which python",
                 "which conda",
                 "pwd | wc -l",
@@ -210,6 +211,23 @@ class ShellExecToolTest(unittest.TestCase):
         self.assertTrue(result["blocked"])
         self.assertEqual(result["reason"], "命令未通过审批")
         self.assertEqual(len(approval.calls), 1)
+        run.assert_not_called()
+
+    def test_never_approval_mode_blocks_confirm_command_without_prompt(self) -> None:
+        approval = StaticApprovalProvider(approved=True)
+        context = ToolContext(
+            cwd=Path.cwd(),
+            allow_shell_exec=True,
+            approval_mode="never",
+            approval_provider=approval,
+        )
+
+        with patch("AsyncClaw.tools.builtin.shell.subprocess.run") as run:
+            result = shell_exec_tool.call({"command": "echo hello > output.txt"}, context)
+
+        self.assertTrue(result["blocked"])
+        self.assertEqual(result["reason"], "后台任务不支持交互式审批")
+        self.assertEqual(approval.calls, [])
         run.assert_not_called()
 
     def test_approved_confirm_command_executes_in_sandbox_root(self) -> None:

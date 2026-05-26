@@ -114,7 +114,13 @@ workspace/cron/jobs.json
 
 ## Cron 定时任务
 
-CLI 默认启动一个轻量 heartbeat 服务，每 1 秒扫描 `workspace/cron/jobs.json`。任务到期时会把 `prompt` 当作用户消息交给同一个 `AgentService` 执行，因此会复用当前 workspace、工具和日志；模型会根据可用工具自动决定是否调用 `current_time`、`shell_exec` 等工具。
+CLI 默认启动一个轻量 heartbeat 服务，每 1 秒扫描 `workspace/cron/jobs.json`。任务到期时会把 `prompt` 作为独立的 cron agent turn 执行：原始任务只作为用户消息进入模型，调度器约束会作为系统提示注入，因此模型仍会根据可用工具自动决定是否调用 `current_time`、`shell_exec` 等工具，同时不会把内部调度提示混入用户可见输出。
+
+默认最多同时执行 2 个定时任务；可以通过 CLI 调整：
+
+```bash
+asyncclaw agent --cron-max-concurrent-jobs 4
+```
 
 启用 workspace 时会暴露以下工具：
 
@@ -129,7 +135,7 @@ CLI 默认启动一个轻量 heartbeat 服务，每 1 秒扫描 `workspace/cron/
 {"schedule": {"type": "every", "seconds": 3600}}
 ```
 
-一次性 `at` 任务执行后会自动禁用；周期性 `every` 任务执行后会计算下一次运行时间。执行失败会记录在任务的 `last_error` 和 `failure_count` 中，后续周期仍会继续调度。
+一次性 `at` 任务执行后会自动禁用；周期性 `every` 任务执行后会计算下一次运行时间。运行中的任务会被标记为 `running`，同一个任务不会在上一次执行完成前重复触发。执行失败会记录在任务的 `last_error` 和 `failure_count` 中，后续周期仍会继续调度。
 
 ## 配置真实 API
 

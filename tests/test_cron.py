@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -21,6 +23,40 @@ class FakeAgentService:
         self.calls.append(text)
         if self.fail:
             raise RuntimeError("任务失败")
+        return type("Response", (), {"output": f"done: {text}"})()
+
+
+class CronAwareFakeAgentService:
+    def __init__(self) -> None:
+        self.cron_calls = []
+        self.text_calls = []
+
+    def handle_cron_text(self, job):
+        self.cron_calls.append(job.prompt)
+        return type("Response", (), {"output": f"cron: {job.prompt}"})()
+
+    def handle_text(self, text: str):
+        self.text_calls.append(text)
+        return type("Response", (), {"output": f"text: {text}"})()
+
+
+class BlockingFakeAgentService:
+    def __init__(self) -> None:
+        self.started: list[str] = []
+        self.finished: list[str] = []
+        self.max_active = 0
+        self._active = 0
+        self._lock = threading.Lock()
+
+    def handle_text(self, text: str):
+        with self._lock:
+            self.started.append(text)
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+        time.sleep(0.05)
+        with self._lock:
+            self.finished.append(text)
+            self._active -= 1
         return type("Response", (), {"output": f"done: {text}"})()
 
 
@@ -61,6 +97,52 @@ class CurrentTimeToolLLM:
                 }
             ]
         }
+
+
+class ConfirmShellExecLLM:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def create_chat_completion(self, **kwargs):
+        self.requests.append(kwargs)
+        if len(self.requests) == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_shell",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "shell_exec",
+                                        "arguments": json.dumps(
+                                            {"command": "echo hello > output.txt"}
+                                        ),
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "shell 已被后台审批策略阻止",
+                    }
+                }
+            ]
+        }
+
+
+class ExplodingApprovalProvider:
+    def approve(self, *, command: str, cwd: Path, reason: str | None = None) -> bool:
+        raise AssertionError("cron 后台任务不应触发交互式审批")
 
 
 class CronStoreTest(unittest.TestCase):
@@ -124,6 +206,32 @@ class CronStoreTest(unittest.TestCase):
         self.assertIn(due.id, due_ids)
         self.assertNotIn(future.id, due_ids)
         self.assertNotIn(running.id, due_ids)
+
+    def test_claim_due_jobs_marks_jobs_running_atomically(self) -> None:
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            store = CronStore(WorkspaceStore(root=Path(directory) / "workspace"))
+            first = store.create_job(
+                name="first",
+                prompt="执行一",
+                schedule={"type": "at", "run_at": now.isoformat()},
+                now=now,
+            )
+            second = store.create_job(
+                name="second",
+                prompt="执行二",
+                schedule={"type": "at", "run_at": now.isoformat()},
+                now=now,
+            )
+
+            claimed = store.claim_due_jobs(now, limit=1)
+            claimed_again = store.claim_due_jobs(now, limit=10)
+            jobs = {job.id: job for job in store.list_jobs()}
+
+        self.assertEqual([job.id for job in claimed], [first.id])
+        self.assertEqual([job.id for job in claimed_again], [second.id])
+        self.assertTrue(jobs[first.id].running)
+        self.assertTrue(jobs[second.id].running)
 
     def test_delete_job_persists(self) -> None:
         now = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -210,6 +318,25 @@ class CronServiceTest(unittest.TestCase):
         self.assertIsNone(updated.next_run_at)
         self.assertEqual(updated.run_count, 1)
         self.assertFalse(updated.running)
+
+    def test_tick_uses_cron_aware_service_when_available(self) -> None:
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            store = CronStore(WorkspaceStore(root=Path(directory) / "workspace"))
+            store.create_job(
+                name="legacy",
+                prompt="提醒一次",
+                schedule={"type": "at", "run_at": now.isoformat()},
+                now=now,
+            )
+            service = CronAwareFakeAgentService()
+            cron = CronService(service=service, store=store, interval_seconds=999)
+
+            results = cron.tick(now)
+
+        self.assertEqual(service.cron_calls, ["提醒一次"])
+        self.assertEqual(service.text_calls, [])
+        self.assertEqual(results[0]["output"], "cron: 提醒一次")
 
     def test_tick_executes_agent_job_and_disables_at_job(self) -> None:
         now = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -320,6 +447,93 @@ class CronServiceTest(unittest.TestCase):
         self.assertTrue(results[0]["success"])
         self.assertEqual(len(cron.service.calls), 1)
 
+    def test_tick_runs_due_jobs_concurrently_up_to_limit(self) -> None:
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            store = CronStore(WorkspaceStore(root=Path(directory) / "workspace"))
+            first = store.create_job(
+                name="first",
+                prompt="执行一",
+                schedule={"type": "at", "run_at": now.isoformat()},
+                action="agent",
+                now=now,
+            )
+            second = store.create_job(
+                name="second",
+                prompt="执行二",
+                schedule={"type": "at", "run_at": now.isoformat()},
+                action="agent",
+                now=now,
+            )
+            service = BlockingFakeAgentService()
+            cron = CronService(
+                service=service,
+                store=store,
+                interval_seconds=999,
+                max_concurrent_jobs=2,
+            )
+
+            results = cron.tick(now)
+
+        self.assertEqual({result["id"] for result in results}, {first.id, second.id})
+        self.assertEqual(service.max_active, 2)
+
+    def test_tick_respects_concurrency_limit(self) -> None:
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            store = CronStore(WorkspaceStore(root=Path(directory) / "workspace"))
+            first = store.create_job(
+                name="first",
+                prompt="执行一",
+                schedule={"type": "at", "run_at": now.isoformat()},
+                action="agent",
+                now=now,
+            )
+            second = store.create_job(
+                name="second",
+                prompt="执行二",
+                schedule={"type": "at", "run_at": now.isoformat()},
+                action="agent",
+                now=now,
+            )
+            service = BlockingFakeAgentService()
+            cron = CronService(
+                service=service,
+                store=store,
+                interval_seconds=999,
+                max_concurrent_jobs=1,
+            )
+
+            first_results = cron.tick(now)
+            second_results = cron.tick(now)
+
+        self.assertEqual([result["id"] for result in first_results], [first.id])
+        self.assertEqual([result["id"] for result in second_results], [second.id])
+        self.assertEqual(service.max_active, 1)
+
+    def test_running_recurring_job_is_not_started_twice(self) -> None:
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            store = CronStore(WorkspaceStore(root=Path(directory) / "workspace"))
+            job = store.create_job(
+                name="repeat",
+                prompt="执行",
+                schedule={"type": "every", "seconds": 10},
+                action="agent",
+                now=now - timedelta(seconds=10),
+            )
+            store.mark_running(job.id, True)
+            cron = CronService(
+                service=BlockingFakeAgentService(),
+                store=store,
+                interval_seconds=999,
+                max_concurrent_jobs=2,
+            )
+
+            results = cron.tick(now)
+
+        self.assertEqual(results, [])
+
     def test_current_time_cron_job_uses_agent_tool_loop(self) -> None:
         now = datetime(2026, 1, 1, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
@@ -348,12 +562,57 @@ class CronServiceTest(unittest.TestCase):
             for tool in llm.requests[0]["tools"]
         ]
         self.assertIn("current_time", first_request_tools)
+        self.assertEqual(llm.requests[0]["messages"][-1]["role"], "user")
+        self.assertEqual(llm.requests[0]["messages"][-1]["content"], "输出当前时间")
+        self.assertIn("这是定时任务的一次触发", llm.requests[0]["messages"][0]["content"])
+        self.assertNotIn("原始任务：输出当前时间", llm.requests[0]["messages"][-1]["content"])
         self.assertEqual(len(llm.requests), 2)
         self.assertTrue(results[0]["success"])
         self.assertEqual(results[0]["id"], job.id)
         self.assertEqual(results[0]["output"], "已通过 current_time 输出当前时间")
         self.assertNotEqual(results[0]["output"], "输出当前时间")
         self.assertEqual(updated.run_count, 1)
+
+    def test_cron_shell_confirm_command_is_blocked_without_interactive_approval(self) -> None:
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = WorkspaceStore(root=Path(directory) / "workspace")
+            llm = ConfirmShellExecLLM()
+            tool_context = ToolContext(
+                cwd=Path(directory),
+                sandbox_root=workspace.root / "office",
+                allow_shell_exec=True,
+                approval_provider=ExplodingApprovalProvider(),
+            )
+            service = AgentService(
+                cwd=directory,
+                workspace=workspace,
+                llm=llm,
+                tool_context=tool_context,
+            )
+            job = service.cron_store.create_job(
+                name="shell",
+                prompt="写入一个文件",
+                schedule={"type": "at", "run_at": now.isoformat()},
+                action="agent",
+                now=now,
+            )
+            cron = CronService(service=service, store=service.cron_store, interval_seconds=999)
+
+            results = cron.tick(now)
+            tool_message = next(
+                message
+                for message in llm.requests[1]["messages"]
+                if message.get("role") == "tool"
+            )
+            tool_result = json.loads(tool_message["content"])
+
+        self.assertTrue(results[0]["success"])
+        self.assertEqual(results[0]["id"], job.id)
+        self.assertEqual(results[0]["output"], "shell 已被后台审批策略阻止")
+        self.assertTrue(tool_result["blocked"])
+        self.assertEqual(tool_result["reason"], "后台任务不支持交互式审批")
+        self.assertFalse((tool_context.sandbox_root / "output.txt").exists())
 
 
 class CronToolTest(unittest.TestCase):

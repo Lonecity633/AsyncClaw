@@ -46,6 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not run the workspace cron heartbeat service",
     )
+    agent_parser.add_argument(
+        "--cron-max-concurrent-jobs",
+        type=int,
+        default=2,
+        help="maximum number of cron jobs that may run concurrently",
+    )
     agent_parser.set_defaults(func=_run_agent)
     return parser
 
@@ -58,6 +64,7 @@ def _run_agent(args: argparse.Namespace) -> int:
         workspace_root=args.workspace_root,
         allow_shell_exec=not args.no_shell,
         allow_cron=not args.no_cron,
+        cron_max_concurrent_jobs=args.cron_max_concurrent_jobs,
     )
 
 

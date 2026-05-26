@@ -16,7 +16,7 @@ class ToolContext:
     cwd: Path
     sandbox_root: Path | None = None
     allow_shell_exec: bool = False
-    approval_mode: Literal["dangerous_only"] = "dangerous_only"
+    approval_mode: Literal["dangerous_only", "never"] = "dangerous_only"
     shell_timeout_seconds: int = 10
     shell_output_limit_bytes: int = 16 * 1024
     approval_provider: ApprovalProvider | None = None

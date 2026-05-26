@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import threading
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from inspect import isawaitable
 from pathlib import Path
 from uuid import uuid4
-from typing import Any, Callable
+from typing import Any, Callable, ClassVar
 
 
 DEFAULT_SYSTEM_PROMPT = """你是 AsyncClaw 智能体。
@@ -41,6 +42,9 @@ DEFAULT_SYSTEM_PROMPT = """你是 AsyncClaw 智能体。
 class WorkspaceStore:
     """Stores short-term sessions, user input history, and long-term profile."""
 
+    _locks_guard: ClassVar[threading.Lock] = threading.Lock()
+    _locks: ClassVar[dict[str, threading.RLock]] = {}
+
     root: Path | str = Path("workspace")
     session_id: str | None = None
     summary_threshold: int = 40
@@ -54,6 +58,16 @@ class WorkspaceStore:
         self.history_dir.mkdir(parents=True, exist_ok=True)
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self.cron_dir.mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def _lock_for_path(cls, path: Path) -> threading.RLock:
+        key = str(path.resolve())
+        with cls._locks_guard:
+            lock = cls._locks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                cls._locks[key] = lock
+            return lock
 
     @property
     def session_dir(self) -> Path:
@@ -158,8 +172,9 @@ class WorkspaceStore:
         return self.short_term_summary_path.read_text(encoding="utf-8")
 
     def save_short_term_summary(self, summary: str) -> dict[str, Any]:
-        self.session_dir.mkdir(parents=True, exist_ok=True)
-        self.short_term_summary_path.write_text(summary, encoding="utf-8")
+        with self._lock_for_path(self.short_term_summary_path):
+            self.session_dir.mkdir(parents=True, exist_ok=True)
+            self.short_term_summary_path.write_text(summary, encoding="utf-8")
         return {
             "path": str(self.short_term_summary_path),
             "bytes": len(summary.encode("utf-8")),
@@ -203,8 +218,9 @@ class WorkspaceStore:
         }
 
     def save_user_profile(self, profile_markdown: str) -> dict[str, Any]:
-        self.memory_dir.mkdir(parents=True, exist_ok=True)
-        self.user_profile_path.write_text(profile_markdown, encoding="utf-8")
+        with self._lock_for_path(self.user_profile_path):
+            self.memory_dir.mkdir(parents=True, exist_ok=True)
+            self.user_profile_path.write_text(profile_markdown, encoding="utf-8")
         return {
             "path": str(self.user_profile_path),
             "bytes": len(profile_markdown.encode("utf-8")),
@@ -219,26 +235,29 @@ class WorkspaceStore:
         return f"{prompt}\n\n当前用户画像：\n{profile}"
 
     def _append_jsonl(self, path: Path, record: dict[str, Any]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as file:
-            file.write(json.dumps(record, ensure_ascii=False, default=str))
-            file.write("\n")
-
-    def _write_jsonl(self, path: Path, records: list[dict[str, Any]]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as file:
-            for record in records:
+        with self._lock_for_path(path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as file:
                 file.write(json.dumps(record, ensure_ascii=False, default=str))
                 file.write("\n")
+
+    def _write_jsonl(self, path: Path, records: list[dict[str, Any]]) -> None:
+        with self._lock_for_path(path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8") as file:
+                for record in records:
+                    file.write(json.dumps(record, ensure_ascii=False, default=str))
+                    file.write("\n")
 
     def _read_jsonl(self, path: Path) -> list[dict[str, Any]]:
         if not path.exists():
             return []
-        return [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        with self._lock_for_path(path):
+            return [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
 
 
 def _new_session_id() -> str:

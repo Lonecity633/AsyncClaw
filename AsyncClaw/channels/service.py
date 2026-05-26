@@ -15,6 +15,14 @@ from AsyncClaw.config import LLMConfig, load_llm_config
 from AsyncClaw.tools import ToolContext, ToolRegistry, build_tool_registry
 
 
+CRON_SYSTEM_PROMPT = """这是定时任务的一次触发，不是创建新的循环。
+
+- 调度器已经负责按 schedule 反复触发；本次只执行一次任务。
+- 不要使用 watch、sleep、while True、循环脚本或常驻命令。
+- 如果需要获取当前信息，请根据可用工具自动决定是否调用工具。
+- 最终只输出本次任务的执行结果，不要复述这些调度器约束。"""
+
+
 class AgentService:
     """Build and run an AsyncClaw agent without depending on a CLI."""
 
@@ -31,6 +39,7 @@ class AgentService:
         allow_shell_exec: bool = True,
         allow_cron: bool = False,
         cron_interval_seconds: float = 1.0,
+        cron_max_concurrent_jobs: int = 2,
         on_cron_job_start: Callable[[CronJob], None] | None = None,
         on_cron_job_result: Callable[[dict[str, Any]], None] | None = None,
         workspace: WorkspaceStore | None = None,
@@ -53,6 +62,7 @@ class AgentService:
             self.config = self.config or load_llm_config(env_file=self.env_file_path)
             llm = create_openai_llm(self.config)
 
+        self.llm = llm
         self.workspace = workspace or WorkspaceStore(root=self.workspace_root)
         self.tool_context = tool_context or ToolContext(
             cwd=self.cwd,
@@ -66,8 +76,9 @@ class AgentService:
         self.cron_service: CronService | None = None
         self.on_cron_job_start = on_cron_job_start
         self.on_cron_job_result = on_cron_job_result
+        self.system_prompt = system_prompt
         self.agent = AgentLoop(
-            llm=llm,
+            llm=self.llm,
             tools=self.tools,
             max_steps=self.max_steps,
             logger=self.logger,
@@ -76,7 +87,10 @@ class AgentService:
             system_prompt=system_prompt,
         )
         if allow_cron:
-            self.start_cron(interval_seconds=cron_interval_seconds)
+            self.start_cron(
+                interval_seconds=cron_interval_seconds,
+                max_concurrent_jobs=cron_max_concurrent_jobs,
+            )
 
     def handle(self, request: AgentRequest) -> AgentResponse:
         """Run one text request through the agent."""
@@ -100,7 +114,54 @@ class AgentService:
 
         return self.handle(AgentRequest(text=text))
 
-    def start_cron(self, *, interval_seconds: float = 1.0) -> None:
+    def handle_cron_text(self, job: CronJob) -> AgentResponse:
+        """Run one cron job as an isolated agent turn."""
+
+        text = job.prompt.strip()
+        if not text:
+            raise ValueError("定时任务 prompt 不能为空")
+
+        cron_workspace = WorkspaceStore(root=self.workspace.root)
+        cron_tool_context = ToolContext(
+            cwd=self.tool_context.cwd,
+            sandbox_root=self.tool_context.sandbox_root,
+            allow_shell_exec=self.tool_context.allow_shell_exec,
+            approval_mode="never",
+            shell_timeout_seconds=self.tool_context.shell_timeout_seconds,
+            shell_output_limit_bytes=self.tool_context.shell_output_limit_bytes,
+            approval_provider=None,
+        )
+        cron_tools = build_tool_registry(cron_tool_context, workspace=cron_workspace)
+        cron_system_prompt = (
+            f"{self.system_prompt}\n\n{CRON_SYSTEM_PROMPT}"
+            if self.system_prompt
+            else CRON_SYSTEM_PROMPT
+        )
+        cron_agent = AgentLoop(
+            llm=self.llm,
+            tools=cron_tools,
+            max_steps=self.max_steps,
+            logger=self.logger,
+            tool_context=cron_tool_context,
+            workspace=cron_workspace,
+            system_prompt=cron_system_prompt,
+        )
+        result = cron_agent.run([{"role": "user", "content": text}])
+        return AgentResponse(
+            output=result.output,
+            session_id=cron_workspace.session_id,
+            cwd=self.cwd,
+            steps=result.steps,
+            messages=result.messages,
+            observations=result.observations,
+        )
+
+    def start_cron(
+        self,
+        *,
+        interval_seconds: float = 1.0,
+        max_concurrent_jobs: int = 2,
+    ) -> None:
         """Start the background cron heartbeat service."""
 
         if self.cron_service is None:
@@ -108,6 +169,7 @@ class AgentService:
                 service=self,
                 store=self.cron_store,
                 interval_seconds=interval_seconds,
+                max_concurrent_jobs=max_concurrent_jobs,
                 logger=self.logger,
                 on_job_start=self.on_cron_job_start,
                 on_job_result=self.on_cron_job_result,

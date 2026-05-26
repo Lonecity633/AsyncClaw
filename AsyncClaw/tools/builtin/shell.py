@@ -28,6 +28,13 @@ def _shell_exec(arguments: dict[str, Any], context: ToolContext | None) -> dict[
 
     approved = decision.action == "safe"
     if decision.action == "confirm":
+        if context.approval_mode == "never":
+            return _blocked_result(
+                command=command,
+                context=context,
+                reason="后台任务不支持交互式审批",
+                approved=False,
+            )
         provider = context.approval_provider or CliApprovalProvider()
         approved = provider.approve(
             command=command,

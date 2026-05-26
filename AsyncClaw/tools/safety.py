@@ -189,6 +189,8 @@ def _is_safe_diagnostic(segment: list[str], *, allow_wc: bool) -> bool:
         return True
     if segment == ["conda", "env", "list"]:
         return True
+    if segment == ["conda", "info", "--envs"]:
+        return True
     if segment in (["which", "python"], ["which", "conda"]):
         return True
     if allow_wc and segment == ["wc", "-l"]:
