@@ -11,8 +11,8 @@ from AsyncClaw.agent.logger import JsonlEventLogger
 from AsyncClaw.agent.runtime import AgentLoop
 from AsyncClaw.agent.workspace import WorkspaceStore
 from AsyncClaw.channels.base import AgentRequest, AgentResponse
-from AsyncClaw.config import LLMConfig, load_llm_config
-from AsyncClaw.tools import ToolContext, ToolRegistry, build_tool_registry
+from AsyncClaw.config import LLMConfig, MCPConfig, load_llm_config, load_mcp_config
+from AsyncClaw.tools import ToolContext, ToolRegistry, build_tool_registry_from_providers
 
 
 CRON_SYSTEM_PROMPT = """这是定时任务的一次触发，不是创建新的循环。
@@ -45,6 +45,7 @@ class AgentService:
         workspace: WorkspaceStore | None = None,
         tool_context: ToolContext | None = None,
         tools: ToolRegistry | None = None,
+        mcp_config: MCPConfig | None = None,
         logger: Any | None = None,
         system_prompt: str | None = None,
     ) -> None:
@@ -69,7 +70,17 @@ class AgentService:
             sandbox_root=self.workspace.root / "office",
             allow_shell_exec=allow_shell_exec,
         )
-        self.tools = tools or build_tool_registry(self.tool_context, workspace=self.workspace)
+        if mcp_config is not None:
+            self.mcp_config = mcp_config
+        elif tools is not None:
+            self.mcp_config = MCPConfig()
+        else:
+            self.mcp_config = load_mcp_config(env_file=self.env_file_path)
+        self.tools = tools or build_tool_registry_from_providers(
+            context=self.tool_context,
+            workspace=self.workspace,
+            mcp_config=self.mcp_config,
+        )
         self.logger = logger or JsonlEventLogger(self.log_path)
         self.max_steps = max_steps or (self.config.agent_max_steps if self.config else 8)
         self.cron_store = CronStore(self.workspace)
@@ -131,7 +142,12 @@ class AgentService:
             shell_output_limit_bytes=self.tool_context.shell_output_limit_bytes,
             approval_provider=None,
         )
-        cron_tools = build_tool_registry(cron_tool_context, workspace=cron_workspace)
+        cron_tools = build_tool_registry_from_providers(
+            context=cron_tool_context,
+            workspace=cron_workspace,
+            mcp_config=self.mcp_config,
+            include_cron_tools=False,
+        )
         cron_system_prompt = (
             f"{self.system_prompt}\n\n{CRON_SYSTEM_PROMPT}"
             if self.system_prompt

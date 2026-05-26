@@ -11,7 +11,13 @@ from AsyncClaw.agent import (
     create_llm,
     create_openai_llm,
 )
-from AsyncClaw.config import LLMConfig, load_llm_config
+from AsyncClaw.config import (
+    LLMConfig,
+    MCPConfig,
+    MCPServerConfig,
+    load_llm_config,
+    load_mcp_config,
+)
 from AsyncClaw.providers import LLMProvider, SUPPORTED_PROVIDERS, get_provider
 from AsyncClaw.tools import (
     Tool,
@@ -19,13 +25,20 @@ from AsyncClaw.tools import (
     ToolExecution,
     ToolExecutor,
     ToolHandler,
+    ToolProvider,
     ToolRegistry,
     build_tool_registry,
+    build_tool_registry_from_providers,
     create_save_user_profile_tool,
     current_time_tool,
+    LocalToolProvider,
+    MCPToolProvider,
     multiply_tool,
     resolve_sandbox_path,
     shell_exec_tool,
+    StreamableHTTPMCPClient,
+    web_fetch_tool,
+    web_search_tool,
 )
 from AsyncClaw.agent.workspace import DEFAULT_SYSTEM_PROMPT, WorkspaceStore
 from AsyncClaw.channels import AgentRequest, AgentResponse, AgentService
@@ -42,6 +55,10 @@ __all__ = [
     "JsonlEventLogger",
     "LLMConfig",
     "LLMProvider",
+    "LocalToolProvider",
+    "MCPConfig",
+    "MCPServerConfig",
+    "MCPToolProvider",
     "OpenAICompatibleLLM",
     "SUPPORTED_PROVIDERS",
     "Tool",
@@ -49,9 +66,11 @@ __all__ = [
     "ToolExecution",
     "ToolExecutor",
     "ToolHandler",
+    "ToolProvider",
     "ToolRegistry",
     "WorkspaceStore",
     "build_tool_registry",
+    "build_tool_registry_from_providers",
     "create_llm",
     "create_openai_llm",
     "create_save_user_profile_tool",
@@ -59,7 +78,11 @@ __all__ = [
     "get_provider",
     "DEFAULT_SYSTEM_PROMPT",
     "load_llm_config",
+    "load_mcp_config",
     "multiply_tool",
     "resolve_sandbox_path",
     "shell_exec_tool",
+    "StreamableHTTPMCPClient",
+    "web_fetch_tool",
+    "web_search_tool",
 ]

@@ -51,6 +51,9 @@ class ToolRegistry:
     def to_openai_tools(self) -> list[dict[str, Any]]:
         return [tool.to_openai_tool() for tool in self._tools.values()]
 
+    def tools(self) -> list[Tool]:
+        return list(self._tools.values())
+
 
 def build_tool_registry(
     context: ToolContext | None = None,
@@ -63,9 +66,10 @@ def build_tool_registry(
     from AsyncClaw.tools.builtin.cron import create_cron_tools
     from AsyncClaw.tools.builtin.shell import shell_exec_tool
     from AsyncClaw.tools.builtin.time import current_time_tool
+    from AsyncClaw.tools.builtin.web import web_fetch_tool, web_search_tool
 
     context = context or ToolContext(cwd=Path.cwd())
-    tools = [multiply_tool, current_time_tool]
+    tools = [multiply_tool, current_time_tool, web_search_tool, web_fetch_tool]
     if workspace is not None:
         tools.append(create_save_user_profile_tool(workspace))
         tools.extend(create_cron_tools(workspace))

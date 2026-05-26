@@ -10,6 +10,7 @@
 - `AsyncClaw.agent.messages`：集中处理 OpenAI SDK 对象或字典响应归一化、工具参数解析和工具消息构造。
 - `AsyncClaw.config.load_llm_config`：通过 `python-dotenv` 加载 `.env`，支持按 provider 切换模型服务商。
 - `AsyncClaw.tools.ToolRegistry`：注册工具，并暴露 OpenAI `tools` schema。
+- `AsyncClaw.tools.ToolProvider`：组合本地工具和可选远端 MCP 工具 provider。
 - `AsyncClaw.tools.ToolExecutor`：统一执行工具，并将工具异常转换成结构化观察结果。
 - `AsyncClaw.tools.ToolContext`：描述单次运行的工具能力和执行边界。
 - `AsyncClaw.tools.resolve_sandbox_path`：解析并校验软沙箱内路径，禁止越界访问。
@@ -18,6 +19,7 @@
 - `AsyncClaw.agent.cron.CronStore` / `CronService`：在 `workspace/cron/jobs.json` 中存储定时任务，并通过 heartbeat 定期触发。
 - `AsyncClaw.tools.multiply_tool`：最简单的示例工具，用于计算两个数字的乘积。
 - `AsyncClaw.tools.current_time_tool`：返回当前本地日期和时间。
+- `AsyncClaw.tools.web_search_tool` / `web_fetch_tool`：使用 Tavily 提供实时网页搜索和网页内容抽取。
 
 工具使用以下内部结构，定义在 `AsyncClaw.tools.spec`：
 
@@ -136,6 +138,71 @@ asyncclaw agent --cron-max-concurrent-jobs 4
 ```
 
 一次性 `at` 任务执行后会自动禁用；周期性 `every` 任务执行后会计算下一次运行时间。运行中的任务会被标记为 `running`，同一个任务不会在上一次执行完成前重复触发。执行失败会记录在任务的 `last_error` 和 `failure_count` 中，后续周期仍会继续调度。
+
+## Tavily 本地 Web 工具
+
+AsyncClaw 默认注册两个 agent 内部工具，不需要 MCP 配置：
+
+- `web_search`：调用 Tavily Search API 获取实时网页搜索结果。
+- `web_fetch`：调用 Tavily Extract API 抽取单个 URL 的网页正文。
+
+先安装项目依赖，并在 `.env` 中提供 Tavily API key：
+
+```bash
+TAVILY_API_KEY=你的-tavily-api-key
+```
+
+这两个工具属于本地内置工具，会随 `build_tool_registry()` 和 `AgentService` 默认工具集合一起暴露给模型。它们不读取 `MCP_CONFIG`，也不会通过 `MCPToolProvider` 注册。
+
+## 远端 MCP 工具 Provider
+
+默认情况下，AsyncClaw 只加载内置本地工具。需要接入第三方 MCP 工具服务时，可以在 `.env` 中指定配置文件：
+
+```bash
+MCP_CONFIG=./mcp.servers.json
+```
+
+示例配置：
+
+```json
+{
+  "servers": [
+    {
+      "name": "vendor",
+      "transport": "streamable-http",
+      "url": "https://vendor.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MCP_VENDOR_TOKEN}"
+      },
+      "timeout_seconds": 10,
+      "enabled": true
+    }
+  ]
+}
+```
+
+启动时会对每个启用的 Streamable HTTP MCP server 执行 `initialize`，再通过 `tools/list` 发现工具。MCP 工具会映射成现有 OpenAI-compatible function tool，并默认加上 server 名前缀，例如远端 `search` 会暴露为 `vendor_search`，避免覆盖内置工具。将 `tool_prefix` 设为 `false` 可以关闭前缀；如果发生重名，保留原有已注册工具。
+
+当模型调用 MCP 工具时，AsyncClaw 会转发为 MCP `tools/call`。远端连接失败、发现失败或调用失败会转换为结构化错误观察结果，不影响内置本地工具继续执行。`headers` 中的 `${ENV_NAME}` 会从环境变量展开，适合放置 API key 或 bearer token。
+
+### GitHub 只读代码审查示例
+
+项目提供了 `mcp.servers.github.example.json`，用于接入 GitHub 官方远端 MCP server 的只读 PR/代码审查能力。先在 `.env` 中启用示例配置，并提供 GitHub PAT 或可用于 GitHub MCP 的 bearer token：
+
+```bash
+MCP_CONFIG=./mcp.servers.github.example.json
+GITHUB_MCP_TOKEN=你的-github-token
+```
+
+示例配置只启用 `repos,pull_requests` toolsets，并设置 `X-MCP-Readonly: true`，适合让 agent 读取仓库、PR、diff、文件和评论后输出审查建议。默认工具名会带 `github_` 前缀，例如 GitHub MCP 返回的工具会以 `github_...` 形式进入模型可用工具列表。
+
+可以这样请求：
+
+```text
+请使用 GitHub 工具审查 owner/repo 的 PR #123，并输出风险点和修改建议。
+```
+
+该示例不会启用创建 review、发表评论、合并 PR 或请求 Copilot review 等写入能力。如果后续需要这些动作，请关闭只读模式并配合更严格的人工确认流程。
 
 ## 配置真实 API
 
