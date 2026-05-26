@@ -1,0 +1,38 @@
+{
+  "run_id": "20260526T110035Z",
+  "workspace_root": null,
+  "registered_tools": [
+    "create_cron_job",
+    "current_time",
+    "delete_cron_job",
+    "github_get_repo",
+    "github_search_pull_requests",
+    "list_cron_jobs",
+    "multiply",
+    "save_user_profile",
+    "shell_exec",
+    "web_fetch",
+    "web_search"
+  ],
+  "total_cases": 30,
+  "evaluated_cases": 30,
+  "skipped_cases": 0,
+  "passed_cases": 30,
+  "task_success_rate": 1.0,
+  "category_success_rate": {
+    "cron": 1.0,
+    "dialogue_reasoning": 1.0,
+    "local_tool_use": 1.0,
+    "mcp_tool_use": 1.0,
+    "memory": 1.0,
+    "shell_safety": 1.0
+  },
+  "avg_latency_seconds": 0.0,
+  "p50_latency_seconds": 0.0,
+  "p95_latency_seconds": 0.0,
+  "tool_call_accuracy": 1.0,
+  "sandbox_safety_pass_rate": 1.0,
+  "memory_recall_rate": 1.0,
+  "cron_reliability": 1.0,
+  "mcp_tool_success_rate": 1.0
+}

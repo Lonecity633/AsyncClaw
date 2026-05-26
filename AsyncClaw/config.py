@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -85,8 +86,11 @@ def load_llm_config(env_file: str | Path = ".env", override: bool = False) -> LL
     )
 
 
-def load_mcp_config(env_file: str | Path = ".env", override: bool = False) -> MCPConfig:
-    """从 `.env` 指向的 JSON 文件加载 MCP 工具服务配置。"""
+def load_judge_llm_config(
+    env_file: str | Path = ".env",
+    override: bool = False,
+) -> LLMConfig:
+    """从独立的 `JUDGE_LLM_*` 环境变量加载 eval judge LLM 配置。"""
 
     try:
         from dotenv import load_dotenv
@@ -96,9 +100,31 @@ def load_mcp_config(env_file: str | Path = ".env", override: bool = False) -> MC
             "安装项目依赖。"
         ) from exc
 
+    load_dotenv(dotenv_path=env_file, override=override)
+    provider = get_provider(os.getenv("JUDGE_LLM_PROVIDER") or "openai")
+
+    return LLMConfig(
+        provider=provider.name,
+        api_key=_read_env("JUDGE_LLM_API_KEY") or "",
+        base_url=_read_env("JUDGE_LLM_BASE_URL") or provider.base_url,
+        model=_read_env("JUDGE_LLM_MODEL") or provider.default_model,
+    )
+
+
+def load_mcp_config(env_file: str | Path = ".env", override: bool = False) -> MCPConfig:
+    """从 `.env` 显式指向的 JSON 文件加载 MCP 工具服务配置。"""
+
+    try:
+        from dotenv import dotenv_values
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "加载 .env 文件需要 python-dotenv。请使用 `pip install -e .` "
+            "安装项目依赖。"
+        ) from exc
+
     env_path = Path(env_file)
-    load_dotenv(dotenv_path=env_path, override=override)
-    config_path = os.getenv("MCP_CONFIG")
+    env_values = _normalize_dotenv_values(dotenv_values(dotenv_path=env_path))
+    config_path = env_values.get("MCP_CONFIG")
     if not config_path:
         return MCPConfig()
 
@@ -112,11 +138,18 @@ def load_mcp_config(env_file: str | Path = ".env", override: bool = False) -> MC
     if not isinstance(raw_servers, list):
         raise ValueError("MCP_CONFIG 中的 servers 必须是数组")
 
-    servers = tuple(_parse_mcp_server(index, item) for index, item in enumerate(raw_servers))
+    servers = tuple(
+        _parse_mcp_server(index, item, env_values)
+        for index, item in enumerate(raw_servers)
+    )
     return MCPConfig(servers=servers)
 
 
-def _parse_mcp_server(index: int, raw: Any) -> MCPServerConfig:
+def _parse_mcp_server(
+    index: int,
+    raw: Any,
+    env_values: Mapping[str, str] | None = None,
+) -> MCPServerConfig:
     if not isinstance(raw, dict):
         raise ValueError(f"MCP server #{index + 1} 必须是对象")
 
@@ -125,8 +158,8 @@ def _parse_mcp_server(index: int, raw: Any) -> MCPServerConfig:
         raise ValueError(f"MCP server #{index + 1} 缺少 name")
 
     transport = str(raw.get("transport") or "streamable-http").strip()
-    headers = _expand_mapping(raw.get("headers") or {})
-    env = _expand_mapping(raw.get("env") or {})
+    headers = _expand_mapping(raw.get("headers") or {}, env_values)
+    env = _expand_mapping(raw.get("env") or {}, env_values)
     timeout = raw.get("timeout_seconds", raw.get("timeout", 10.0))
 
     return MCPServerConfig(
@@ -144,16 +177,35 @@ def _parse_mcp_server(index: int, raw: Any) -> MCPServerConfig:
     )
 
 
-def _expand_mapping(raw: Any) -> dict[str, str]:
+def _expand_mapping(
+    raw: Any,
+    env_values: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     if not isinstance(raw, dict):
         raise ValueError("MCP headers/env 必须是对象")
-    return {str(key): _expand_env_refs(str(value)) for key, value in raw.items()}
+    return {
+        str(key): _expand_env_refs(str(value), env_values)
+        for key, value in raw.items()
+    }
 
 
-def _expand_env_refs(value: str) -> str:
-    for name, env_value in os.environ.items():
+def _expand_env_refs(
+    value: str,
+    env_values: Mapping[str, str] | None = None,
+) -> str:
+    merged_env = dict(os.environ)
+    merged_env.update(env_values or {})
+    for name, env_value in merged_env.items():
         value = value.replace("${" + name + "}", env_value)
     return value
+
+
+def _normalize_dotenv_values(raw: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        str(key): str(value)
+        for key, value in raw.items()
+        if value is not None
+    }
 
 
 def _read_env(*names: str) -> str | None:

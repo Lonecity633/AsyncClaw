@@ -317,6 +317,56 @@ class MCPToolProviderTest(unittest.TestCase):
         self.assertIn("vendor_search", startup_tool_names)
         self.assertNotIn("vendor_search", cron_tool_names)
 
+    def test_mcp_config_ignores_shell_env_when_dotenv_does_not_enable_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env_path = Path(directory) / ".env"
+            env_path.write_text("GITHUB_MCP_TOKEN=dotenv_token\n", encoding="utf-8")
+
+            with patch.dict(
+                "os.environ",
+                {"MCP_CONFIG": "missing-mcp-config.json"},
+                clear=True,
+            ):
+                config = load_mcp_config(env_file=env_path)
+
+        self.assertEqual(config, MCPConfig())
+
+    def test_dotenv_mcp_config_loads_relative_to_dotenv_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "mcp.servers.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "servers": [
+                            {
+                                "name": "vendor",
+                                "url": "https://vendor.example.com/mcp",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            env_path = root / ".env"
+            env_path.write_text("MCP_CONFIG=./mcp.servers.json\n", encoding="utf-8")
+
+            with patch.dict("os.environ", {}, clear=True):
+                config = load_mcp_config(env_file=env_path)
+
+        self.assertEqual(len(config.servers), 1)
+        self.assertEqual(config.servers[0].name, "vendor")
+        self.assertEqual(config.servers[0].url, "https://vendor.example.com/mcp")
+
+    def test_dotenv_mcp_config_missing_file_remains_strict(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env_path = Path(directory) / ".env"
+            env_path.write_text("MCP_CONFIG=./missing.json\n", encoding="utf-8")
+
+            with patch.dict("os.environ", {}, clear=True):
+                with self.assertRaises(FileNotFoundError):
+                    load_mcp_config(env_file=env_path)
+
     def test_github_mcp_example_config_parses_read_only_headers(self) -> None:
         example_config = (
             Path(__file__).resolve().parents[1] / "mcp.servers.github.example.json"
@@ -346,6 +396,33 @@ class MCPToolProviderTest(unittest.TestCase):
         self.assertEqual(server.headers["X-MCP-Toolsets"], "repos,pull_requests")
         self.assertEqual(server.headers["X-MCP-Readonly"], "true")
         self.assertEqual(server.headers["X-MCP-Lockdown"], "false")
+
+    def test_dotenv_values_override_shell_when_expanding_mcp_headers(self) -> None:
+        example_config = (
+            Path(__file__).resolve().parents[1] / "mcp.servers.github.example.json"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            env_path = Path(directory) / ".env"
+            env_path.write_text(
+                "\n".join(
+                    [
+                        f"MCP_CONFIG={example_config}",
+                        "GITHUB_MCP_TOKEN=dotenv_token",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict(
+                "os.environ",
+                {"GITHUB_MCP_TOKEN": "shell_token"},
+                clear=True,
+            ):
+                config = load_mcp_config(env_file=env_path)
+
+        self.assertEqual(
+            config.servers[0].headers["Authorization"],
+            "Bearer dotenv_token",
+        )
 
 
 if __name__ == "__main__":

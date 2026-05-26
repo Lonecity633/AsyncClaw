@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from AsyncClaw.agent.llm import create_llm, create_openai_llm
-from AsyncClaw.config import LLMConfig, load_llm_config
+from AsyncClaw.config import LLMConfig, load_judge_llm_config, load_llm_config
 from AsyncClaw.providers import get_provider
 
 
@@ -89,6 +89,48 @@ class LLMProviderConfigTests(unittest.TestCase):
     def test_unknown_provider_lists_supported_values(self) -> None:
         with self.assertRaisesRegex(ValueError, "openai"):
             get_provider("missing")
+
+    def test_judge_llm_config_uses_independent_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_file = Path(tmpdir) / ".env"
+            env_file.write_text("", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "LLM_PROVIDER": "deepseek",
+                    "LLM_API_KEY": "agent-key",
+                    "LLM_MODEL": "agent-model",
+                    "JUDGE_LLM_PROVIDER": "siliconflow",
+                    "JUDGE_LLM_API_KEY": "judge-key",
+                    "JUDGE_LLM_MODEL": "judge-model",
+                    "JUDGE_LLM_BASE_URL": "https://judge.example/v1",
+                },
+                clear=True,
+            ):
+                config = load_judge_llm_config(env_file=env_file)
+
+        self.assertEqual(config.provider, "siliconflow")
+        self.assertEqual(config.api_key, "judge-key")
+        self.assertEqual(config.model, "judge-model")
+        self.assertEqual(config.base_url, "https://judge.example/v1")
+
+    def test_judge_llm_config_does_not_reuse_agent_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_file = Path(tmpdir) / ".env"
+            env_file.write_text("", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "LLM_API_KEY": "agent-key",
+                    "JUDGE_LLM_PROVIDER": "openai",
+                },
+                clear=True,
+            ):
+                config = load_judge_llm_config(env_file=env_file)
+
+        self.assertEqual(config.provider, "openai")
+        self.assertEqual(config.api_key, "")
+        self.assertEqual(config.model, "gpt-4o-mini")
 
 
 class LLMFactoryProviderTests(unittest.TestCase):

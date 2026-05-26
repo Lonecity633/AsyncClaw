@@ -312,6 +312,97 @@ logs/events.jsonl
 tail -f logs/events.jsonl
 ```
 
+## Evaluation / Metrics
+
+AsyncClaw 提供一个轻量级 Eval v0.1，用 30 条 JSONL case 展示 agent 工程能力覆盖面。case 分为 `local_tool_use`、`shell_safety`、`memory`、`cron`、`mcp_tool_use`、`dialogue_reasoning` 六类，每类 5 条。默认 `evals/cases.jsonl` 是 Smoke / 显式工具调用基线；`evals/implicit_cases.jsonl` 是 Implicit / 隐式工具选择测试集，prompt 不直接点名具体工具，更适合观察模型是否能自行选择能力。这个测评思路参考了 OpenClaw / nanobot 这类 agent 项目对工具调用、安全边界、记忆、调度和外部工具接入能力的工程测试方式，但 AsyncClaw 当前采用更轻量的 30-case eval，便于本地和 CI 快速运行。
+
+真实模型测评会复用 `AgentService.handle_text()`，并默认使用隔离 workspace：
+
+```text
+evals/results/workspaces/<run_id>/
+```
+
+这样不会清空或污染项目正常使用的 `workspace/`，同时同一次 eval 内的 memory 和 cron case 仍能共享上下文。推荐运行：
+
+```bash
+conda run -n pyclaw python evals/run_eval.py \
+  --output evals/results/real_metrics.json
+```
+
+运行隐式工具选择测试集：
+
+```bash
+conda run -n pyclaw python evals/run_eval.py \
+  --cases evals/implicit_cases.jsonl \
+  --output evals/results/implicit_metrics.json \
+  --details-output evals/results/implicit_cases.jsonl
+```
+
+运行后会输出每条 case 的 `PASS` / `FAIL` / `SKIP`，并写入汇总指标和逐 case 明细：
+
+```text
+evals/results/real_metrics.json
+evals/results/latest_cases.jsonl
+```
+
+如果要覆盖 GitHub MCP case，请在 `.env` 中启用示例配置并提供 token：
+
+```text
+MCP_CONFIG=./mcp.servers.github.example.json
+GITHUB_MCP_TOKEN=你的-github-token
+```
+
+如果没有配置 GitHub MCP，`mcp_tool_use` case 会被标记为 `SKIP`，不计入失败。
+
+无真实 LLM key 时可以使用 mock 模式做 smoke test，但它不代表真实模型能力：
+
+```bash
+python evals/run_eval.py --mock
+```
+
+也可以用 mock 模式确认隐式测试集能完整加载和评分：
+
+```bash
+python evals/run_eval.py --mock --cases evals/implicit_cases.jsonl
+```
+
+语义质量可以启用独立 judge LLM 复判。工具是否调用正确仍由规则判分；judge 只会在文本语义规则失败且 case 配置了 `judge_rubric` 时介入：
+
+```bash
+conda run -n pyclaw python evals/run_eval.py \
+  --judge \
+  --cases evals/implicit_cases.jsonl \
+  --output evals/results/implicit_judged_metrics.json \
+  --details-output evals/results/implicit_judged_cases.jsonl
+```
+
+judge LLM 使用独立配置，不会复用被测 agent 的 `LLM_*`：
+
+```text
+JUDGE_LLM_PROVIDER=openai
+JUDGE_LLM_API_KEY=你的-judge-api-key
+JUDGE_LLM_MODEL=gpt-4o-mini
+# JUDGE_LLM_BASE_URL=https://api.openai.com/v1
+```
+
+临时切换 judge 模型可以使用：
+
+```bash
+python evals/run_eval.py --judge --judge-model gpt-4o-mini --cases evals/implicit_cases.jsonl
+```
+
+示例指标表：
+
+| Metric | Meaning |
+| --- | --- |
+| Task Success Rate | 未跳过 eval case 的通过率 |
+| Tool-call Accuracy | `local_tool_use` case 中期望工具调用的通过率 |
+| Sandbox Safety Pass Rate | `shell_safety` case 对危险请求的拒绝与安全处理通过率 |
+| Memory Recall Rate | `memory` case 对长期偏好保存和回忆的通过率 |
+| Cron Reliability | `cron` case 对定时任务创建、查询和调度意图识别的通过率 |
+| MCP Tool Success Rate | `mcp_tool_use` case 对外部 MCP 工具调用的通过率 |
+| p50 / p95 Latency | 单条 case 运行延迟的中位数和 95 分位 |
+
 ## 运行测试
 
 ```bash

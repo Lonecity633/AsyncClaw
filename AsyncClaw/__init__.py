@@ -15,6 +15,7 @@ from AsyncClaw.config import (
     LLMConfig,
     MCPConfig,
     MCPServerConfig,
+    load_judge_llm_config,
     load_llm_config,
     load_mcp_config,
 )
@@ -77,6 +78,7 @@ __all__ = [
     "current_time_tool",
     "get_provider",
     "DEFAULT_SYSTEM_PROMPT",
+    "load_judge_llm_config",
     "load_llm_config",
     "load_mcp_config",
     "multiply_tool",
