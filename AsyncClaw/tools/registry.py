@@ -60,6 +60,7 @@ def build_tool_registry(
 
     from AsyncClaw.tools.builtin.math import multiply_tool
     from AsyncClaw.tools.builtin.memory import create_save_user_profile_tool
+    from AsyncClaw.tools.builtin.cron import create_cron_tools
     from AsyncClaw.tools.builtin.shell import shell_exec_tool
     from AsyncClaw.tools.builtin.time import current_time_tool
 
@@ -67,6 +68,7 @@ def build_tool_registry(
     tools = [multiply_tool, current_time_tool]
     if workspace is not None:
         tools.append(create_save_user_profile_tool(workspace))
+        tools.extend(create_cron_tools(workspace))
     if context.allow_shell_exec:
         tools.append(shell_exec_tool)
     return ToolRegistry(tools)

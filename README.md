@@ -15,6 +15,7 @@
 - `AsyncClaw.tools.resolve_sandbox_path`：解析并校验软沙箱内路径，禁止越界访问。
 - `AsyncClaw.tools.shell_exec_tool`：可选的本地 shell 工具，仅在 `ToolContext` 允许时暴露。
 - `AsyncClaw.agent.workspace.WorkspaceStore`：在 `workspace/` 中存储会话、用户输入历史和长期用户画像。
+- `AsyncClaw.agent.cron.CronStore` / `CronService`：在 `workspace/cron/jobs.json` 中存储定时任务，并通过 heartbeat 定期触发。
 - `AsyncClaw.tools.multiply_tool`：最简单的示例工具，用于计算两个数字的乘积。
 - `AsyncClaw.tools.current_time_tool`：返回当前本地日期和时间。
 
@@ -98,6 +99,7 @@ workspace/session/{session_id}.jsonl
 workspace/session/{session_id}.summary.md
 workspace/history/user_inputs.jsonl
 workspace/memory/user_profile.md
+workspace/cron/jobs.json
 ```
 
 每次运行 CLI 会自动生成一个 `session_id`。同一会话内的完整回合写入 session；一轮包含用户消息、助手工具调用、工具结果和助手最终回复。所有用户输入同时写入全局 history。
@@ -109,6 +111,25 @@ workspace/memory/user_profile.md
 - 后续请求会注入系统提示词、当前 `user_profile.md`、近期对话摘要和最近 10 轮完整消息。
 
 启用 workspace 时会暴露 `save_user_profile` 工具。模型判断用户消息包含长期信息时，可以调用该工具并传入完整 Markdown 用户画像，工具会覆盖写入 `workspace/memory/user_profile.md`。
+
+## Cron 定时任务
+
+CLI 默认启动一个轻量 heartbeat 服务，每 1 秒扫描 `workspace/cron/jobs.json`。任务到期时会把 `prompt` 当作用户消息交给同一个 `AgentService` 执行，因此会复用当前 workspace、工具和日志；模型会根据可用工具自动决定是否调用 `current_time`、`shell_exec` 等工具。
+
+启用 workspace 时会暴露以下工具：
+
+- `create_cron_job`：创建定时任务。
+- `list_cron_jobs`：列出所有定时任务。
+- `delete_cron_job`：按 `id` 删除定时任务。
+
+调度格式支持：
+
+```json
+{"schedule": {"type": "at", "run_at": "2026-05-25T10:00:00+00:00"}}
+{"schedule": {"type": "every", "seconds": 3600}}
+```
+
+一次性 `at` 任务执行后会自动禁用；周期性 `every` 任务执行后会计算下一次运行时间。执行失败会记录在任务的 `last_error` 和 `failure_count` 中，后续周期仍会继续调度。
 
 ## 配置真实 API
 
@@ -178,6 +199,12 @@ asyncclaw agent --workspace-root /path/to/asyncclaw-workspace
 
 ```bash
 asyncclaw agent --no-shell
+```
+
+如果不想启动 cron heartbeat，可以运行：
+
+```bash
+asyncclaw agent --no-cron
 ```
 
 旧示例仍可运行，并会转到同一个 Rich CLI：

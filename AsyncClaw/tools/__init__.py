@@ -1,6 +1,7 @@
 """工具注册与内置工具。"""
 
 from AsyncClaw.tools.approval import ApprovalProvider, CliApprovalProvider
+from AsyncClaw.tools.builtin.cron import create_cron_tools
 from AsyncClaw.tools.builtin.math import multiply_tool
 from AsyncClaw.tools.builtin.memory import create_save_user_profile_tool
 from AsyncClaw.tools.builtin.shell import shell_exec_tool
@@ -24,6 +25,7 @@ __all__ = [
     "ToolRegistry",
     "build_tool_registry",
     "check_shell_command",
+    "create_cron_tools",
     "create_save_user_profile_tool",
     "current_time_tool",
     "multiply_tool",

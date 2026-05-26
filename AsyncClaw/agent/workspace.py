@@ -53,6 +53,7 @@ class WorkspaceStore:
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.history_dir.mkdir(parents=True, exist_ok=True)
         self.memory_dir.mkdir(parents=True, exist_ok=True)
+        self.cron_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def session_dir(self) -> Path:
@@ -65,6 +66,10 @@ class WorkspaceStore:
     @property
     def memory_dir(self) -> Path:
         return self.root / "memory"
+
+    @property
+    def cron_dir(self) -> Path:
+        return self.root / "cron"
 
     @property
     def session_path(self) -> Path:
@@ -81,6 +86,10 @@ class WorkspaceStore:
     @property
     def user_profile_path(self) -> Path:
         return self.memory_dir / "user_profile.md"
+
+    @property
+    def cron_jobs_path(self) -> Path:
+        return self.cron_dir / "jobs.json"
 
     def load_session_turns(self) -> list[dict[str, Any]]:
         records = self._read_jsonl(self.session_path)

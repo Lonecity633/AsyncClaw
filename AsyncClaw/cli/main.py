@@ -41,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not expose the shell_exec tool",
     )
+    agent_parser.add_argument(
+        "--no-cron",
+        action="store_true",
+        help="do not run the workspace cron heartbeat service",
+    )
     agent_parser.set_defaults(func=_run_agent)
     return parser
 
@@ -52,6 +57,7 @@ def _run_agent(args: argparse.Namespace) -> int:
         env_file_explicit=args.env_file is not None,
         workspace_root=args.workspace_root,
         allow_shell_exec=not args.no_shell,
+        allow_cron=not args.no_cron,
     )
 
 

@@ -12,6 +12,7 @@ from rich.prompt import Prompt
 from rich.rule import Rule
 from rich.text import Text
 
+from AsyncClaw.agent.cron import CronJob
 from AsyncClaw.channels.service import AgentService
 
 
@@ -31,6 +32,7 @@ def run_agent_cli(
     env_file_explicit: bool = False,
     workspace_root: str | Path | None = None,
     allow_shell_exec: bool = True,
+    allow_cron: bool = True,
     console: Console | None = None,
 ) -> int:
     """Run the interactive CLI agent."""
@@ -42,37 +44,43 @@ def run_agent_cli(
         env_file_explicit=env_file_explicit,
         workspace_root=workspace_root,
         allow_shell_exec=allow_shell_exec,
+        allow_cron=allow_cron,
+        on_cron_job_start=lambda job: _render_cron_start(console, job),
+        on_cron_job_result=lambda result: _render_cron_result(console, result),
     )
     _render_startup(console, service)
 
-    while True:
-        try:
-            user_text = _read_user_text(console)
-        except (EOFError, KeyboardInterrupt):
-            console.print()
-            console.print("[yellow]已退出 AsyncClaw。[/]")
-            return 0
+    try:
+        while True:
+            try:
+                user_text = _read_user_text(console)
+            except (EOFError, KeyboardInterrupt):
+                console.print()
+                console.print("[yellow]已退出 AsyncClaw。[/]")
+                return 0
 
-        if not user_text:
-            continue
-        if user_text.lower() in EXIT_COMMANDS:
-            console.print("[yellow]已退出 AsyncClaw。[/]")
-            return 0
+            if not user_text:
+                continue
+            if user_text.lower() in EXIT_COMMANDS:
+                console.print("[yellow]已退出 AsyncClaw。[/]")
+                return 0
 
-        try:
-            with console.status("[bold green]AsyncClaw 思考中...[/]", spinner="dots"):
-                response = service.handle_text(user_text)
-        except Exception as exc:
-            console.print(
-                Panel(
-                    Text(str(exc), style="red"),
-                    title="错误",
-                    border_style="red",
+            try:
+                with console.status("[bold green]AsyncClaw 思考中...[/]", spinner="dots"):
+                    response = service.handle_text(user_text)
+            except Exception as exc:
+                console.print(
+                    Panel(
+                        Text(str(exc), style="red"),
+                        title="错误",
+                        border_style="red",
+                    )
                 )
-            )
-            continue
+                continue
 
-        _render_response(console, response.output)
+            _render_response(console, response.output)
+    finally:
+        service.stop_cron()
 
 
 def _render_startup(console: Console, service: AgentService) -> None:
@@ -80,6 +88,7 @@ def _render_startup(console: Console, service: AgentService) -> None:
     provider = config.provider if config is not None else "custom"
     model = config.model if config is not None else "custom"
     shell_status = "enabled" if service.tool_context.allow_shell_exec else "disabled"
+    cron_status = "enabled" if service.cron_service is not None else "disabled"
     body = (
         f"[bold]cwd[/]: {service.cwd}\n"
         f"[bold]workspace[/]: {service.workspace.root}\n"
@@ -87,7 +96,9 @@ def _render_startup(console: Console, service: AgentService) -> None:
         f"[bold]provider[/]: {provider}\n"
         f"[bold]model[/]: {model}\n"
         f"[bold]env[/]: {service.env_file_path}\n"
-        f"[bold]shell_exec[/]: {shell_status}\n\n"
+        f"[bold]shell_exec[/]: {shell_status}\n"
+        f"[bold]cron[/]: {cron_status}\n"
+        f"[bold]cron_dir[/]: {service.workspace.cron_dir}\n\n"
         "输入 [bold]exit[/] 或 [bold]quit[/] 退出。"
     )
     console.print(
@@ -102,6 +113,36 @@ def _render_startup(console: Console, service: AgentService) -> None:
 def _render_response(console: Console, output: str | None) -> None:
     console.print(Rule("[bold green]助手[/]", style="green"))
     console.print(Markdown(output or "（无输出）"))
+    console.print()
+
+
+def _render_cron_start(console: Console, job: CronJob) -> None:
+    console.print()
+    console.print(
+        Panel(
+            Text("正在执行..."),
+            title=f"定时任务执行中: {job.name}",
+            border_style="magenta",
+        )
+    )
+    console.print()
+
+
+def _render_cron_result(console: Console, result: dict) -> None:
+    name = result.get("name") or "定时任务"
+    if result.get("success"):
+        console.print(Rule(f"[bold magenta]定时任务结果: {name}[/]", style="magenta"))
+        console.print(Markdown(result.get("output") or "（无输出）"))
+        console.print()
+        return
+
+    console.print(
+        Panel(
+            Text(str(result.get("error") or "未知错误"), style="red"),
+            title=f"定时任务失败: {name}",
+            border_style="red",
+        )
+    )
     console.print()
 
 

@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from rich.console import Console
+
+from AsyncClaw.agent.cron import CronJob
 from AsyncClaw.channels import AgentRequest, AgentService
 from AsyncClaw.agent.workspace import WorkspaceStore
 from AsyncClaw.cli.main import main
 from AsyncClaw.config import LLMConfig
 from AsyncClaw.channels.service import _resolve_env_file
-from AsyncClaw.cli.agent import _normalize_user_input
+from AsyncClaw.cli.agent import _normalize_user_input, _render_cron_start
 
 
 class SimpleLLM:
@@ -322,6 +326,7 @@ class CliMainTest(unittest.TestCase):
             env_file_explicit=True,
             workspace_root=None,
             allow_shell_exec=False,
+            allow_cron=True,
         )
 
     def test_agent_command_marks_default_env_file_as_implicit(self) -> None:
@@ -336,6 +341,7 @@ class CliMainTest(unittest.TestCase):
             env_file_explicit=False,
             workspace_root=None,
             allow_shell_exec=True,
+            allow_cron=True,
         )
 
     def test_agent_command_dispatches_explicit_workspace_root(self) -> None:
@@ -351,6 +357,22 @@ class CliMainTest(unittest.TestCase):
             env_file_explicit=False,
             workspace_root=workspace_root,
             allow_shell_exec=True,
+            allow_cron=True,
+        )
+
+    def test_agent_command_can_disable_cron(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("AsyncClaw.cli.main.run_agent_cli", return_value=0) as run_agent_cli:
+                exit_code = main(["agent", "--cwd", directory, "--no-cron"])
+
+        self.assertEqual(exit_code, 0)
+        run_agent_cli.assert_called_once_with(
+            cwd=Path(directory),
+            env_file=".env",
+            env_file_explicit=False,
+            workspace_root=None,
+            allow_shell_exec=True,
+            allow_cron=False,
         )
 
 
@@ -365,6 +387,35 @@ class CliInputTest(unittest.TestCase):
 
     def test_normalize_user_input_applies_ctrl_u_line_clear(self) -> None:
         self.assertEqual(_normalize_user_input("draft\x15final"), "final")
+
+
+class CliCronRenderTest(unittest.TestCase):
+    def test_cron_start_does_not_render_prompt(self) -> None:
+        console = Console(file=io.StringIO(), record=True, width=100)
+        job = CronJob(
+            id="job-1",
+            name="当前时间任务",
+            prompt="输出当前时间",
+            action="agent",
+            schedule={"type": "every", "seconds": 10},
+            enabled=True,
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+            last_run_at=None,
+            next_run_at="2026-01-01T00:00:10+00:00",
+            run_count=0,
+            failure_count=0,
+            last_error=None,
+            running=False,
+        )
+
+        _render_cron_start(console, job)
+        output = console.export_text(styles=False)
+
+        self.assertIn("定时任务执行中", output)
+        self.assertIn("当前时间任务", output)
+        self.assertIn("正在执行", output)
+        self.assertNotIn("输出当前时间", output)
 
 
 if __name__ == "__main__":

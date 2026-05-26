@@ -18,6 +18,7 @@ class WorkspaceStoreTest(unittest.TestCase):
             self.assertTrue(workspace.session_dir.is_dir())
             self.assertTrue(workspace.history_dir.is_dir())
             self.assertTrue(workspace.memory_dir.is_dir())
+            self.assertTrue(workspace.cron_dir.is_dir())
 
     def test_session_reads_all_turns_below_summary_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from AsyncClaw.agent.cron import CronJob, CronService, CronStore
 from AsyncClaw.agent.llm import create_openai_llm
 from AsyncClaw.agent.logger import JsonlEventLogger
 from AsyncClaw.agent.runtime import AgentLoop
@@ -28,6 +29,10 @@ class AgentService:
         llm: Any | None = None,
         max_steps: int | None = None,
         allow_shell_exec: bool = True,
+        allow_cron: bool = False,
+        cron_interval_seconds: float = 1.0,
+        on_cron_job_start: Callable[[CronJob], None] | None = None,
+        on_cron_job_result: Callable[[dict[str, Any]], None] | None = None,
         workspace: WorkspaceStore | None = None,
         tool_context: ToolContext | None = None,
         tools: ToolRegistry | None = None,
@@ -57,6 +62,10 @@ class AgentService:
         self.tools = tools or build_tool_registry(self.tool_context, workspace=self.workspace)
         self.logger = logger or JsonlEventLogger(self.log_path)
         self.max_steps = max_steps or (self.config.agent_max_steps if self.config else 8)
+        self.cron_store = CronStore(self.workspace)
+        self.cron_service: CronService | None = None
+        self.on_cron_job_start = on_cron_job_start
+        self.on_cron_job_result = on_cron_job_result
         self.agent = AgentLoop(
             llm=llm,
             tools=self.tools,
@@ -66,6 +75,8 @@ class AgentService:
             workspace=self.workspace,
             system_prompt=system_prompt,
         )
+        if allow_cron:
+            self.start_cron(interval_seconds=cron_interval_seconds)
 
     def handle(self, request: AgentRequest) -> AgentResponse:
         """Run one text request through the agent."""
@@ -88,6 +99,26 @@ class AgentService:
         """Convenience wrapper for simple text channels."""
 
         return self.handle(AgentRequest(text=text))
+
+    def start_cron(self, *, interval_seconds: float = 1.0) -> None:
+        """Start the background cron heartbeat service."""
+
+        if self.cron_service is None:
+            self.cron_service = CronService(
+                service=self,
+                store=self.cron_store,
+                interval_seconds=interval_seconds,
+                logger=self.logger,
+                on_job_start=self.on_cron_job_start,
+                on_job_result=self.on_cron_job_result,
+            )
+        self.cron_service.start()
+
+    def stop_cron(self) -> None:
+        """Stop the background cron heartbeat service if it is running."""
+
+        if self.cron_service is not None:
+            self.cron_service.stop()
 
 
 def _resolve_env_file(cwd: Path, path: str | Path, *, explicit: bool = False) -> Path:
