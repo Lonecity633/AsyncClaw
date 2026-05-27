@@ -17,10 +17,12 @@ from AsyncClaw.cli.main import main
 from AsyncClaw.config import LLMConfig
 from AsyncClaw.channels.service import _resolve_env_file
 from AsyncClaw.cli.agent import (
+    EXIT_COMMANDS,
     _normalize_user_input,
     _patch_stdout_context,
     _read_user_text,
     _render_cron_start,
+    _render_startup,
 )
 
 
@@ -404,7 +406,30 @@ class CliMainTest(unittest.TestCase):
         )
 
 
+class CliStartupRenderTest(unittest.TestCase):
+    def test_startup_renders_wordmark_and_concise_status(self) -> None:
+        console = Console(file=io.StringIO(), record=True, width=100)
+
+        _render_startup(console, object())
+        output = console.export_text(styles=False)
+
+        self.assertIn("AsyncClaw", output)
+        self.assertIn("Welcome to AsyncClaw", output)
+        self.assertIn("Ready in dev mode.", output)
+        self.assertIn("/exit", output)
+        self.assertIn("local agent runtime", output)
+        self.assertIn("╭", output)
+        self.assertNotIn("workspace", output)
+        self.assertNotIn("session", output)
+        self.assertNotIn("cron_dir", output)
+
+
 class CliInputTest(unittest.TestCase):
+    def test_exit_commands_include_slash_exit_alias(self) -> None:
+        self.assertIn("/exit", EXIT_COMMANDS)
+        self.assertIn("exit", EXIT_COMMANDS)
+        self.assertIn("quit", EXIT_COMMANDS)
+
     def test_normalize_user_input_applies_backspace(self) -> None:
         self.assertEqual(_normalize_user_input("hellp\x7fo"), "hello")
         self.assertEqual(_normalize_user_input("hellp\bo"), "hello")

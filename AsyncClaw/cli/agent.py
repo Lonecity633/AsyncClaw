@@ -17,6 +17,7 @@ from rich.text import Text
 
 from AsyncClaw.agent.cron import CronJob
 from AsyncClaw.channels.service import AgentService
+from AsyncClaw.cli.logo import render_pixel_logo
 
 try:
     from prompt_toolkit import PromptSession
@@ -26,7 +27,7 @@ except ImportError:  # pragma: no cover - dependency is declared for installed C
     patch_stdout = None
 
 
-EXIT_COMMANDS = {"exit", "quit"}
+EXIT_COMMANDS = {"/exit", "exit", "quit"}
 ANSI_SEQUENCE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[()][A-Za-z0-9]")
 
 try:
@@ -104,31 +105,14 @@ def _render_startup(
     *,
     lock: threading.RLock | None = None,
 ) -> None:
-    config = service.config
-    provider = config.provider if config is not None else "custom"
-    model = config.model if config is not None else "custom"
-    shell_status = "enabled" if service.tool_context.allow_shell_exec else "disabled"
-    cron_status = "enabled" if service.cron_service is not None else "disabled"
-    body = (
-        f"[bold]cwd[/]: {service.cwd}\n"
-        f"[bold]workspace[/]: {service.workspace.root}\n"
-        f"[bold]session[/]: {service.workspace.session_id}\n"
-        f"[bold]provider[/]: {provider}\n"
-        f"[bold]model[/]: {model}\n"
-        f"[bold]env[/]: {service.env_file_path}\n"
-        f"[bold]shell_exec[/]: {shell_status}\n"
-        f"[bold]cron[/]: {cron_status}\n"
-        f"[bold]cron_dir[/]: {service.workspace.cron_dir}\n\n"
-        "输入 [bold]exit[/] 或 [bold]quit[/] 退出。"
-    )
     with _render_context(lock):
+        console.print(render_pixel_logo(), overflow="ignore", no_wrap=True)
+        console.print("[bold]Welcome to [purple]AsyncClaw[/][/]")
+        console.print("[cyan]Ready in dev mode.[/]")
         console.print(
-            Panel.fit(
-                body,
-                title="[bold cyan]AsyncClaw Agent[/]",
-                border_style="cyan",
-            )
+            "[dim]Type a command to begin. Use[/] [purple]/exit[/] [dim]to quit.[/]"
         )
+        console.print()
 
 
 def _render_response(
