@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import re
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -28,6 +28,7 @@ except ImportError:  # pragma: no cover - dependency is declared for installed C
 
 
 EXIT_COMMANDS = {"/exit", "exit", "quit"}
+APPROVAL_ACCEPTED = {"y", "yes", "是", "确认", "执行"}
 ANSI_SEQUENCE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[()][A-Za-z0-9]")
 
 try:
@@ -52,12 +53,18 @@ def run_agent_cli(
     console = console or Console()
     render_lock = threading.RLock()
     prompt_session = PromptSession() if PromptSession is not None else None
+    approval_provider = CliShellApprovalProvider(
+        console=console,
+        session=prompt_session,
+        lock=render_lock,
+    )
     service = AgentService(
         cwd=cwd,
         env_file=env_file,
         env_file_explicit=env_file_explicit,
         workspace_root=workspace_root,
         allow_shell_exec=allow_shell_exec,
+        approval_provider=approval_provider,
         allow_cron=allow_cron,
         cron_max_concurrent_jobs=cron_max_concurrent_jobs,
         on_cron_job_start=lambda job: _render_cron_start(console, job, lock=render_lock),
@@ -81,7 +88,8 @@ def run_agent_cli(
                 return 0
 
             try:
-                with console.status("[bold green]AsyncClaw 思考中...[/]", spinner="dots"):
+                with console.status("[bold green]AsyncClaw 思考中...[/]", spinner="dots") as status:
+                    approval_provider.status = status
                     response = service.handle_text(user_text)
             except Exception as exc:
                 with _render_context(render_lock):
@@ -93,10 +101,57 @@ def run_agent_cli(
                         )
                     )
                 continue
+            finally:
+                approval_provider.status = None
 
             _render_response(console, response.output, lock=render_lock)
     finally:
         service.stop_cron()
+
+
+class CliShellApprovalProvider:
+    """Interactive shell approval prompt for the Rich CLI."""
+
+    def __init__(
+        self,
+        *,
+        console: Console,
+        session: Any | None = None,
+        lock: threading.RLock | None = None,
+    ) -> None:
+        self.console = console
+        self.session = session
+        self.lock = lock
+        self.status: Any | None = None
+
+    def approve(self, *, command: str, cwd: Path, reason: str | None = None) -> bool:
+        with self._paused_status():
+            with _render_context(self.lock):
+                self.console.print()
+                self.console.print("[bold yellow]shell_exec 需要审批。[/]")
+                self.console.print(f"工作目录：{cwd}")
+                self.console.print(f"命令：{command}")
+                if reason:
+                    self.console.print(f"原因：{reason}")
+                try:
+                    answer = _read_approval_text(self.console, session=self.session)
+                except (EOFError, KeyboardInterrupt):
+                    self.console.print("[yellow]已取消执行。[/]")
+                    return False
+        return answer.strip().lower() in APPROVAL_ACCEPTED
+
+    @contextmanager
+    def _paused_status(self) -> Iterator[None]:
+        status = self.status
+        if status is None:
+            yield
+            return
+
+        status.stop()
+        try:
+            yield
+        finally:
+            status.start()
 
 
 def _render_startup(
@@ -188,18 +243,34 @@ def _read_user_text(
     session: Any | None = None,
 ) -> str:
     if session is not None:
-        if patch_stdout is not None:
-            with _patch_stdout_context():
-                raw_text = session.prompt("用户: ")
-        else:
-            raw_text = session.prompt("用户: ")
-        return _normalize_user_input(raw_text).strip()
+        return _read_session_text(session, "用户: ")
     if PromptSession is not None and patch_stdout is not None:
         prompt_session = PromptSession()
-        with _patch_stdout_context():
-            raw_text = prompt_session.prompt("用户: ")
-        return _normalize_user_input(raw_text).strip()
+        return _read_session_text(prompt_session, "用户: ")
     raw_text = Prompt.ask("[bold cyan]用户[/]", console=console)
+    return _normalize_user_input(raw_text).strip()
+
+
+def _read_approval_text(
+    console: Console,
+    *,
+    session: Any | None = None,
+) -> str:
+    if session is not None:
+        return _read_session_text(session, "是否执行该命令？[是/否] ")
+    if PromptSession is not None and patch_stdout is not None:
+        prompt_session = PromptSession()
+        return _read_session_text(prompt_session, "是否执行该命令？[是/否] ")
+    raw_text = console.input("是否执行该命令？[是/否] ")
+    return _normalize_user_input(raw_text).strip()
+
+
+def _read_session_text(session: Any, prompt: str) -> str:
+    if patch_stdout is not None:
+        with _patch_stdout_context():
+            raw_text = session.prompt(prompt)
+    else:
+        raw_text = session.prompt(prompt)
     return _normalize_user_input(raw_text).strip()
 
 

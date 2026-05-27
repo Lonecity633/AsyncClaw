@@ -11,10 +11,12 @@ from AsyncClaw import (
     AgentLoop,
     JsonlEventLogger,
     Tool,
+    ToolContext,
     ToolRegistry,
     WorkspaceStore,
     current_time_tool,
     multiply_tool,
+    shell_exec_tool,
 )
 
 
@@ -243,6 +245,55 @@ class SummaryWorkspaceLLM:
         }
 
 
+class LongToolResultLLM:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def create_chat_completion(self, **kwargs):
+        self.requests.append(kwargs)
+        if len(self.requests) == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_long",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "long_result",
+                                        "arguments": "{}",
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "已读取长结果",
+                    }
+                }
+            ]
+        }
+
+
+class CountingToolRegistry(ToolRegistry):
+    def __init__(self, tools: list[Tool]) -> None:
+        super().__init__(tools)
+        self.to_openai_tools_calls = 0
+
+    def to_openai_tools(self) -> list[dict[str, object]]:
+        self.to_openai_tools_calls += 1
+        return super().to_openai_tools()
+
+
 class AgentLoopTest(unittest.TestCase):
     def test_runs_tool_call_and_returns_final_answer(self) -> None:
         llm = FakeLLM()
@@ -267,6 +318,16 @@ class AgentLoopTest(unittest.TestCase):
         self.assertEqual(second_request_messages[-1]["role"], "tool")
         self.assertEqual(second_request_messages[-1]["tool_call_id"], "call_multiply")
         self.assertEqual(json.loads(second_request_messages[-1]["content"]), {"product": 15})
+
+    def test_reuses_cached_openai_tool_schema_across_steps(self) -> None:
+        llm = FakeLLM()
+        registry = CountingToolRegistry([multiply_tool])
+        agent = AgentLoop(llm, registry, logger=MemoryLogger())
+
+        agent.run([{"role": "user", "content": "3 乘以 5 等于多少？"}])
+
+        self.assertEqual(registry.to_openai_tools_calls, 1)
+        self.assertIs(llm.requests[0]["tools"], llm.requests[1]["tools"])
 
     def test_current_time_tool_returns_local_time_shape(self) -> None:
         result = ToolRegistry([current_time_tool]).call("current_time", {})
@@ -419,6 +480,49 @@ class AgentLoopTest(unittest.TestCase):
         self.assertEqual(session_records[-1]["messages"][-1]["content"], "已读取 workspace")
         self.assertEqual(history_records[-1]["content"], "你好")
 
+    def test_workspace_shell_prompt_guides_local_shell_use_when_available(self) -> None:
+        llm = WorkspaceLLM()
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = WorkspaceStore(
+                root=Path(directory) / "workspace",
+                session_id="session-a",
+            )
+            agent = AgentLoop(
+                llm,
+                ToolRegistry([shell_exec_tool]),
+                tool_context=ToolContext(cwd=Path(directory), allow_shell_exec=True),
+                workspace=workspace,
+                logger=MemoryLogger(),
+            )
+
+            agent.run([{"role": "user", "content": "当前在哪个目录？"}])
+            system_prompt = llm.requests[0]["messages"][0]["content"]
+
+        self.assertIn("本地 shell 工具使用规则", system_prompt)
+        self.assertIn("当前目录", system_prompt)
+        self.assertIn("shell_exec", system_prompt)
+        self.assertIn("不要在 shell_exec 可用时声称无法访问本地工作目录", system_prompt)
+
+    def test_workspace_shell_prompt_is_not_injected_when_shell_tool_is_unavailable(self) -> None:
+        llm = WorkspaceLLM()
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = WorkspaceStore(
+                root=Path(directory) / "workspace",
+                session_id="session-a",
+            )
+            agent = AgentLoop(
+                llm,
+                ToolRegistry([]),
+                workspace=workspace,
+                logger=MemoryLogger(),
+            )
+
+            agent.run([{"role": "user", "content": "当前在哪个目录？"}])
+            system_prompt = llm.requests[0]["messages"][0]["content"]
+
+        self.assertNotIn("本地 shell 工具使用规则", system_prompt)
+        self.assertNotIn("不要在 shell_exec 可用时声称无法访问本地工作目录", system_prompt)
+
     def test_workspace_records_complete_tool_turn(self) -> None:
         llm = FakeLLM()
         with tempfile.TemporaryDirectory() as directory:
@@ -448,6 +552,28 @@ class AgentLoopTest(unittest.TestCase):
         self.assertEqual(messages[1]["tool_calls"][0]["id"], "call_multiply")
         self.assertEqual(messages[2]["tool_call_id"], "call_multiply")
         self.assertEqual(json.loads(messages[2]["content"]), {"product": 15})
+
+    def test_current_turn_tool_result_is_not_truncated_before_final_answer(self) -> None:
+        long_text = "x" * 5000
+
+        def long_result(arguments):
+            return {"text": long_text}
+
+        tool = Tool(
+            name="long_result",
+            description="返回长文本。",
+            schema={"type": "object", "properties": {}, "additionalProperties": False},
+            handler=long_result,
+        )
+        llm = LongToolResultLLM()
+        agent = AgentLoop(llm, ToolRegistry([tool]), logger=MemoryLogger())
+
+        result = agent.run([{"role": "user", "content": "读取长结果"}])
+        tool_message = llm.requests[1]["messages"][-1]
+
+        self.assertEqual(result.output, "已读取长结果")
+        self.assertEqual(json.loads(tool_message["content"]), {"text": long_text})
+        self.assertNotIn("历史工具结果已截断", tool_message["content"])
 
     def test_workspace_compacts_history_before_llm_request(self) -> None:
         llm = SummaryWorkspaceLLM()

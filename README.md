@@ -196,8 +196,10 @@ TAVILY_API_KEY=你的-tavily-api-key
 默认情况下，AsyncClaw 只加载内置本地工具。需要接入第三方 MCP 工具服务时，可以在 `.env` 中指定配置文件：
 
 ```bash
-MCP_CONFIG=./mcp.servers.json
+MCP_CONFIG=./config/mcp/my-mcp.json
 ```
+
+建议把非密钥 MCP JSON 配置统一放在 `config/mcp/`，`.env` 只保存 `MCP_CONFIG` 引用和 `${...}` 展开所需的 token/key。
 
 示例配置：
 
@@ -224,10 +226,10 @@ MCP_CONFIG=./mcp.servers.json
 
 ### GitHub 只读代码审查示例
 
-项目提供了 `mcp.servers.github.example.json`，用于接入 GitHub 官方远端 MCP server 的只读 PR/代码审查能力。先在 `.env` 中启用示例配置，并提供 GitHub PAT 或可用于 GitHub MCP 的 bearer token：
+项目提供了 `config/mcp/github.readonly.example.json`，用于接入 GitHub 官方远端 MCP server 的只读 PR/代码审查能力。先在 `.env` 中启用示例配置，并提供 GitHub PAT 或可用于 GitHub MCP 的 bearer token：
 
 ```bash
-MCP_CONFIG=./mcp.servers.github.example.json
+MCP_CONFIG=./config/mcp/github.readonly.example.json
 GITHUB_MCP_TOKEN=你的-github-token
 ```
 
@@ -252,7 +254,7 @@ DEEPSEEK_MODEL=deepseek-v4-flash
 AGENT_MAX_STEPS=8
 ```
 
-内置 provider 定义在 `AsyncClaw.providers`，当前包含：
+内置 provider 定义在 `AsyncClaw.config.providers`，并通过 `AsyncClaw.providers` 保留兼容导入。当前包含：
 
 - `openai`
 - `deepseek`
@@ -385,7 +387,7 @@ evals/results/latest_cases.jsonl
 如果要覆盖 GitHub MCP case，请在 `.env` 中启用示例配置并提供 token：
 
 ```text
-MCP_CONFIG=./mcp.servers.github.example.json
+MCP_CONFIG=./config/mcp/github.readonly.example.json
 GITHUB_MCP_TOKEN=你的-github-token
 ```
 

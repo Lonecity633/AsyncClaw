@@ -1,0 +1,3 @@
+"""Constants for MCP protocol integration."""
+
+MCP_PROTOCOL_VERSION = "2025-06-18"

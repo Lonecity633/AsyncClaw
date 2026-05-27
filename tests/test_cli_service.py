@@ -17,13 +17,16 @@ from AsyncClaw.cli.main import main
 from AsyncClaw.config import LLMConfig
 from AsyncClaw.channels.service import _resolve_env_file
 from AsyncClaw.cli.agent import (
+    CliShellApprovalProvider,
     EXIT_COMMANDS,
     _normalize_user_input,
     _patch_stdout_context,
     _read_user_text,
     _render_cron_start,
     _render_startup,
+    run_agent_cli,
 )
+from AsyncClaw.tools import ToolContext
 
 
 class SimpleLLM:
@@ -124,6 +127,11 @@ class SaveProfileLLM:
         }
 
 
+class DummyApprovalProvider:
+    def approve(self, *, command: str, cwd: Path, reason: str | None = None) -> bool:
+        return False
+
+
 class AgentServiceTest(unittest.TestCase):
     def test_service_handles_text_from_configured_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -179,6 +187,34 @@ class AgentServiceTest(unittest.TestCase):
 
         self.assertNotIn("shell_exec", tool_names)
         self.assertFalse(service.tool_context.allow_shell_exec)
+
+    def test_service_passes_approval_provider_to_default_tool_context(self) -> None:
+        approval = DummyApprovalProvider()
+        with tempfile.TemporaryDirectory() as directory:
+            project_root = Path(directory) / "project"
+            project_root.mkdir()
+            with patch("AsyncClaw.channels.service._project_root", return_value=project_root):
+                service = AgentService(
+                    cwd=directory,
+                    llm=SimpleLLM(),
+                    approval_provider=approval,
+                )
+
+        self.assertIs(service.tool_context.approval_provider, approval)
+
+    def test_service_does_not_override_custom_tool_context_approval(self) -> None:
+        approval = DummyApprovalProvider()
+        with tempfile.TemporaryDirectory() as directory:
+            custom_context = ToolContext(cwd=Path(directory), allow_shell_exec=True)
+            service = AgentService(
+                cwd=directory,
+                llm=SimpleLLM(),
+                tool_context=custom_context,
+                approval_provider=approval,
+            )
+
+        self.assertIs(service.tool_context, custom_context)
+        self.assertIsNone(service.tool_context.approval_provider)
 
     def test_service_returns_tool_observations(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -406,6 +442,24 @@ class CliMainTest(unittest.TestCase):
         )
 
 
+class CliRunAgentTest(unittest.TestCase):
+    def test_run_agent_cli_passes_cli_approval_provider_to_service(self) -> None:
+        class FakeService:
+            def stop_cron(self) -> None:
+                pass
+
+        console = Console(file=io.StringIO(), record=True)
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("AsyncClaw.cli.agent.AgentService", return_value=FakeService()) as service:
+                with patch("AsyncClaw.cli.agent._read_user_text", return_value="/exit"):
+                    exit_code = run_agent_cli(cwd=directory, console=console)
+
+        approval_provider = service.call_args.kwargs["approval_provider"]
+        self.assertEqual(exit_code, 0)
+        self.assertIsInstance(approval_provider, CliShellApprovalProvider)
+        self.assertIs(approval_provider.console, console)
+
+
 class CliStartupRenderTest(unittest.TestCase):
     def test_startup_renders_wordmark_and_concise_status(self) -> None:
         console = Console(file=io.StringIO(), record=True, width=100)
@@ -513,7 +567,10 @@ class CliInputTest(unittest.TestCase):
         self.assertEqual(calls, [{"raw": True}, {}])
 
     def test_prompt_toolkit_non_raw_output_replaces_escape_character(self) -> None:
-        from prompt_toolkit.output.vt100 import Vt100_Output
+        try:
+            from prompt_toolkit.output.vt100 import Vt100_Output
+        except ModuleNotFoundError:
+            self.skipTest("prompt_toolkit is not installed")
 
         class FakeStdout:
             def __init__(self) -> None:
@@ -533,6 +590,83 @@ class CliInputTest(unittest.TestCase):
         output.write("\x1b[35m")
 
         self.assertIn("?[35m", "".join(output._buffer))
+
+
+class CliShellApprovalProviderTest(unittest.TestCase):
+    def test_approval_accepts_yes(self) -> None:
+        class FakePromptSession:
+            def prompt(self, prompt: str) -> str:
+                self.prompt_text = prompt
+                return "是"
+
+        session = FakePromptSession()
+        console = Console(file=io.StringIO(), record=True)
+        provider = CliShellApprovalProvider(console=console, session=session)
+
+        approved = provider.approve(
+            command="rm -rf delete",
+            cwd=Path("/tmp/workspace/office"),
+            reason="命令需要用户确认",
+        )
+
+        output = console.export_text(styles=False)
+        self.assertTrue(approved)
+        self.assertEqual(session.prompt_text, "是否执行该命令？[是/否] ")
+        self.assertIn("shell_exec 需要审批。", output)
+        self.assertIn("工作目录：/tmp/workspace/office", output)
+        self.assertIn("命令：rm -rf delete", output)
+        self.assertIn("原因：命令需要用户确认", output)
+
+    def test_approval_rejects_no_and_empty_input(self) -> None:
+        class FakePromptSession:
+            def __init__(self, answer: str) -> None:
+                self.answer = answer
+
+            def prompt(self, prompt: str) -> str:
+                return self.answer
+
+        console = Console(file=io.StringIO(), record=True)
+        no_provider = CliShellApprovalProvider(
+            console=console,
+            session=FakePromptSession("否"),
+        )
+        empty_provider = CliShellApprovalProvider(
+            console=console,
+            session=FakePromptSession(""),
+        )
+
+        self.assertFalse(
+            no_provider.approve(command="rm -rf delete", cwd=Path("/tmp/workspace/office"))
+        )
+        self.assertFalse(
+            empty_provider.approve(command="rm -rf delete", cwd=Path("/tmp/workspace/office"))
+        )
+
+    def test_approval_pauses_and_restores_status_around_prompt(self) -> None:
+        events = []
+
+        class FakeStatus:
+            def stop(self) -> None:
+                events.append("stop")
+
+            def start(self) -> None:
+                events.append("start")
+
+        class FakePromptSession:
+            def prompt(self, prompt: str) -> str:
+                events.append("prompt")
+                return "yes"
+
+        provider = CliShellApprovalProvider(
+            console=Console(file=io.StringIO(), record=True),
+            session=FakePromptSession(),
+        )
+        provider.status = FakeStatus()
+
+        approved = provider.approve(command="touch output.txt", cwd=Path("/tmp/workspace/office"))
+
+        self.assertTrue(approved)
+        self.assertEqual(events, ["stop", "prompt", "start"])
 
 
 class CliCronRenderTest(unittest.TestCase):

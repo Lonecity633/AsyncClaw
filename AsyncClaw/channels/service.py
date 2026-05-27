@@ -11,8 +11,21 @@ from AsyncClaw.agent.logger import JsonlEventLogger
 from AsyncClaw.agent.runtime import AgentLoop
 from AsyncClaw.agent.workspace import WorkspaceStore
 from AsyncClaw.channels.base import AgentRequest, AgentResponse
-from AsyncClaw.config import LLMConfig, MCPConfig, load_llm_config, load_mcp_config
-from AsyncClaw.tools import ToolContext, ToolRegistry, build_tool_registry_from_providers
+from AsyncClaw.config import (
+    LLMConfig,
+    MCPConfig,
+    load_llm_config,
+    load_mcp_config,
+    resolve_env_file,
+    resolve_log_path,
+    resolve_workspace_root,
+)
+from AsyncClaw.tools import (
+    ApprovalProvider,
+    ToolContext,
+    ToolRegistry,
+    build_tool_registry_from_providers,
+)
 
 
 CRON_SYSTEM_PROMPT = """这是定时任务的一次触发，不是创建新的循环。
@@ -37,6 +50,7 @@ class AgentService:
         llm: Any | None = None,
         max_steps: int | None = None,
         allow_shell_exec: bool = True,
+        approval_provider: ApprovalProvider | None = None,
         allow_cron: bool = False,
         cron_interval_seconds: float = 1.0,
         cron_max_concurrent_jobs: int = 2,
@@ -69,6 +83,7 @@ class AgentService:
             cwd=self.cwd,
             sandbox_root=self.workspace.root / "office",
             allow_shell_exec=allow_shell_exec,
+            approval_provider=approval_provider,
         )
         if mcp_config is not None:
             self.mcp_config = mcp_config
@@ -200,22 +215,7 @@ class AgentService:
 
 
 def _resolve_env_file(cwd: Path, path: str | Path, *, explicit: bool = False) -> Path:
-    resolved = Path(path)
-    if resolved.is_absolute():
-        return resolved
-
-    cwd_path = cwd / resolved
-    if explicit or resolved != Path(".env"):
-        return cwd_path
-
-    if cwd_path.exists():
-        return cwd_path
-
-    project_env = _project_root() / ".env"
-    if project_env.exists():
-        return project_env
-
-    return cwd_path
+    return resolve_env_file(cwd, path, explicit=explicit, root=_project_root())
 
 
 def _project_root() -> Path:
@@ -223,15 +223,12 @@ def _project_root() -> Path:
 
 
 def _resolve_workspace_root(cwd: Path, workspace_root: str | Path | None = None) -> Path:
-    if workspace_root is None:
-        return (_project_root() / "workspace").resolve()
-    resolved = Path(workspace_root)
-    if resolved.is_absolute():
-        return resolved.resolve()
-    return (cwd / resolved).resolve()
+    return resolve_workspace_root(cwd, workspace_root, root=_project_root())
 
 
 def _resolve_log_path(workspace_root: str | Path | None, resolved_workspace_root: Path) -> Path:
-    if workspace_root is None:
-        return (_project_root() / "logs" / "events.jsonl").resolve()
-    return (resolved_workspace_root / "logs" / "events.jsonl").resolve()
+    return resolve_log_path(
+        workspace_root,
+        resolved_workspace_root,
+        root=_project_root(),
+    )

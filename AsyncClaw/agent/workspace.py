@@ -14,6 +14,9 @@ from typing import Any, Callable, ClassVar
 
 from AsyncClaw.agent.skills import Skill, build_skills_catalog, load_workspace_skills
 
+HISTORICAL_TOOL_CONTENT_LIMIT_BYTES = 4 * 1024
+HISTORICAL_TOOL_CONTENT_TRUNCATED_MARKER_PREFIX = "历史工具结果已截断到"
+
 
 DEFAULT_SYSTEM_PROMPT = """你是 AsyncClaw 智能体。
 
@@ -51,6 +54,7 @@ class WorkspaceStore:
     session_id: str | None = None
     summary_threshold: int = 40
     recent_turn_limit: int = 10
+    historical_tool_content_limit_bytes: int = HISTORICAL_TOOL_CONTENT_LIMIT_BYTES
 
     def __post_init__(self) -> None:
         root = Path(self.root).resolve()
@@ -138,7 +142,12 @@ class WorkspaceStore:
                 }
             )
         for turn in self.load_session_turns():
-            messages.extend(_copy_messages(turn.get("messages") or []))
+            messages.extend(
+                _copy_context_messages(
+                    turn.get("messages") or [],
+                    tool_content_limit_bytes=self.historical_tool_content_limit_bytes,
+                )
+            )
         return messages
 
     def append_session_turn(self, messages: list[dict[str, Any]]) -> None:
@@ -294,3 +303,32 @@ def _utc_now() -> str:
 
 def _copy_messages(messages: list[Any]) -> list[dict[str, Any]]:
     return [deepcopy(message) for message in messages if isinstance(message, dict)]
+
+
+def _copy_context_messages(
+    messages: list[Any],
+    *,
+    tool_content_limit_bytes: int,
+) -> list[dict[str, Any]]:
+    copied = _copy_messages(messages)
+    for message in copied:
+        if message.get("role") != "tool":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            message["content"] = _truncate_text_bytes(
+                content,
+                tool_content_limit_bytes,
+            )
+    return copied
+
+
+def _truncate_text_bytes(text: str, limit: int) -> str:
+    marker = f"\n[{HISTORICAL_TOOL_CONTENT_TRUNCATED_MARKER_PREFIX} {limit} 字节]"
+    if limit <= 0:
+        return marker.lstrip()
+    encoded = text.encode("utf-8", errors="replace")
+    if len(encoded) <= limit:
+        return text
+    truncated = encoded[:limit].decode("utf-8", errors="replace")
+    return f"{truncated}{marker}"

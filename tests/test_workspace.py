@@ -42,6 +42,36 @@ class WorkspaceStoreTest(unittest.TestCase):
         self.assertEqual(messages[0], {"role": "user", "content": "user-0"})
         self.assertEqual(messages[-1], {"role": "assistant", "content": "assistant-11"})
 
+    def test_context_messages_truncate_historical_tool_content_only(self) -> None:
+        long_tool_content = "结果：" + ("长" * 50)
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = WorkspaceStore(
+                root=Path(directory) / "workspace",
+                session_id="session-a",
+                historical_tool_content_limit_bytes=24,
+            )
+            workspace.append_session_turn(
+                [
+                    {"role": "user", "content": "查一下"},
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call-long",
+                        "name": "web_search",
+                        "content": long_tool_content,
+                    },
+                    {"role": "assistant", "content": "查完了"},
+                ]
+            )
+
+            turns = workspace.load_session_turns()
+            messages = workspace.load_context_messages()
+
+        self.assertEqual(turns[0]["messages"][1]["content"], long_tool_content)
+        self.assertEqual(messages[0]["content"], "查一下")
+        self.assertIn("历史工具结果已截断到 24 字节", messages[1]["content"])
+        self.assertLess(len(messages[1]["content"].encode("utf-8")), len(long_tool_content.encode("utf-8")))
+        self.assertEqual(messages[2]["content"], "查完了")
+
     def test_session_compaction_keeps_recent_complete_turns(self) -> None:
         async def summarize(previous_summary, discarded_turns):
             self.assertEqual(previous_summary, "旧摘要")

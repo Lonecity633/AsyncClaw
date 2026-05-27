@@ -334,7 +334,8 @@ class MCPToolProviderTest(unittest.TestCase):
     def test_dotenv_mcp_config_loads_relative_to_dotenv_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            config_path = root / "mcp.servers.json"
+            config_path = root / "config" / "mcp" / "mcp.servers.json"
+            config_path.parent.mkdir(parents=True)
             config_path.write_text(
                 json.dumps(
                     {
@@ -349,7 +350,10 @@ class MCPToolProviderTest(unittest.TestCase):
                 encoding="utf-8",
             )
             env_path = root / ".env"
-            env_path.write_text("MCP_CONFIG=./mcp.servers.json\n", encoding="utf-8")
+            env_path.write_text(
+                "MCP_CONFIG=./config/mcp/mcp.servers.json\n",
+                encoding="utf-8",
+            )
 
             with patch.dict("os.environ", {}, clear=True):
                 config = load_mcp_config(env_file=env_path)
@@ -369,7 +373,10 @@ class MCPToolProviderTest(unittest.TestCase):
 
     def test_github_mcp_example_config_parses_read_only_headers(self) -> None:
         example_config = (
-            Path(__file__).resolve().parents[1] / "mcp.servers.github.example.json"
+            Path(__file__).resolve().parents[1]
+            / "config"
+            / "mcp"
+            / "github.readonly.example.json"
         )
         with tempfile.TemporaryDirectory() as directory:
             env_path = Path(directory) / ".env"
@@ -399,7 +406,10 @@ class MCPToolProviderTest(unittest.TestCase):
 
     def test_dotenv_values_override_shell_when_expanding_mcp_headers(self) -> None:
         example_config = (
-            Path(__file__).resolve().parents[1] / "mcp.servers.github.example.json"
+            Path(__file__).resolve().parents[1]
+            / "config"
+            / "mcp"
+            / "github.readonly.example.json"
         )
         with tempfile.TemporaryDirectory() as directory:
             env_path = Path(directory) / ".env"
