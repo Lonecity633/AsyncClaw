@@ -5,6 +5,7 @@ from AsyncClaw.tools.builtin.cron import create_cron_tools
 from AsyncClaw.tools.builtin.math import multiply_tool
 from AsyncClaw.tools.builtin.memory import create_save_user_profile_tool
 from AsyncClaw.tools.builtin.shell import shell_exec_tool
+from AsyncClaw.tools.builtin.skills import create_load_skill_tool
 from AsyncClaw.tools.builtin.time import current_time_tool
 from AsyncClaw.tools.builtin.web import web_fetch_tool, web_search_tool
 from AsyncClaw.tools.context import ToolContext
@@ -35,6 +36,7 @@ __all__ = [
     "build_tool_registry_from_providers",
     "check_shell_command",
     "create_cron_tools",
+    "create_load_skill_tool",
     "create_save_user_profile_tool",
     "current_time_tool",
     "LocalToolProvider",

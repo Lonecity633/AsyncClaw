@@ -20,6 +20,8 @@
 - `AsyncClaw.tools.multiply_tool`：最简单的示例工具，用于计算两个数字的乘积。
 - `AsyncClaw.tools.current_time_tool`：返回当前本地日期和时间。
 - `AsyncClaw.tools.web_search_tool` / `web_fetch_tool`：使用 Tavily 提供实时网页搜索和网页内容抽取。
+- `AsyncClaw.agent.skills.Skill` / `load_workspace_skills`：从 `workspace/skills/` 加载支持渐进式披露的 Agent Skills。
+- `AsyncClaw.tools.create_load_skill_tool`：按需读取 skill 正文或 skill 目录内文本资源。
 
 工具使用以下内部结构，定义在 `AsyncClaw.tools.spec`：
 
@@ -102,6 +104,7 @@ workspace/session/{session_id}.summary.md
 workspace/history/user_inputs.jsonl
 workspace/memory/user_profile.md
 workspace/cron/jobs.json
+workspace/skills/{skill_name}/SKILL.md
 ```
 
 每次运行 CLI 会自动生成一个 `session_id`。同一会话内的完整回合写入 session；一轮包含用户消息、助手工具调用、工具结果和助手最终回复。所有用户输入同时写入全局 history。
@@ -113,6 +116,39 @@ workspace/cron/jobs.json
 - 后续请求会注入系统提示词、当前 `user_profile.md`、近期对话摘要和最近 10 轮完整消息。
 
 启用 workspace 时会暴露 `save_user_profile` 工具。模型判断用户消息包含长期信息时，可以调用该工具并传入完整 Markdown 用户画像，工具会覆盖写入 `workspace/memory/user_profile.md`。
+
+## Workspace Skills
+
+AsyncClaw 会自动发现 workspace 下的轻量 Agent Skill：
+
+```text
+workspace/skills/python-review/SKILL.md
+workspace/skills/python-review/references/checklist.md
+```
+
+每个 skill 使用一个目录，当前只扫描一级子目录中的 `SKILL.md`。`SKILL.md` 必须包含 `name` 和 `description` frontmatter；系统提示中只注入紧凑 catalog，完整正文由模型在需要时调用 `load_skill` 工具读取。
+
+最小示例：
+
+```markdown
+---
+name: python-review
+description: 审查 Python 代码时关注安全边界、异常路径和可测试性。
+---
+
+# Python Review
+
+审查 Python 代码时，优先关注边界条件、异常路径和可测试性。
+如果可以用标准库解决，不要主动引入新依赖。
+```
+
+渐进式披露分三层：
+
+- `name` / `description`：常驻 system prompt，帮助模型判断是否需要该 skill。
+- `SKILL.md` 正文：通过 `load_skill({"name": "python-review"})` 按需读取。
+- `references/` 等文本资源：通过 `load_skill({"name": "python-review", "resource_path": "references/checklist.md"})` 按需读取。
+
+`load_skill` 只能读取对应 skill 目录内的 UTF-8 文本资源，拒绝绝对路径、`..` 越界、敏感文件名、二进制和过大文件。v1 不执行 `scripts/`，也不自动安装依赖。
 
 ## Cron 定时任务
 
@@ -129,6 +165,7 @@ asyncclaw agent --cron-max-concurrent-jobs 4
 - `create_cron_job`：创建定时任务。
 - `list_cron_jobs`：列出所有定时任务。
 - `delete_cron_job`：按 `id` 删除定时任务。
+- `clear_cron_jobs`：删除所有定时任务，适合“停止所有/取消所有/清空所有定时任务”。
 
 调度格式支持：
 
@@ -255,7 +292,7 @@ asyncclaw agent
 
 安装后可在任意目录运行 `asyncclaw agent`。CLI 会把启动目录作为任务目录，工具上下文中的 `cwd` 会指向这里；会话和记忆默认写入 AsyncClaw 项目根目录：
 
-- `workspace/`：会话、历史输入、长期记忆和 shell 软沙箱。
+- `workspace/`：会话、历史输入、长期记忆、定时任务、skills 和 shell 软沙箱。
 - `logs/events.jsonl`：智能体事件日志。
 
 启动面板中的 `workspace` 字段会显示实际记忆存储路径。如果想把 session 和 memory 写到指定位置，可以运行：

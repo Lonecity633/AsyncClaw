@@ -13,13 +13,18 @@ ENV/
 .env
 .env.*
 !.env.example
+mcp.servers*.json
+!mcp.servers*.example.json
 
 # Test, coverage, and type-check caches
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.pyre/
+.pytype/
 .coverage
 .coverage.*
+coverage.xml
 htmlcov/
 
 # Build and packaging output
@@ -27,16 +32,22 @@ build/
 dist/
 *.egg-info/
 .eggs/
+pip-wheel-metadata/
 
 # Logs and runtime output
 logs/
 *.log
 workspace/
+evals/results/
 
 # Editor and OS files
 .DS_Store
+._*
+Thumbs.db
 .idea/
 .vscode/
+*.swp
+*.swo
 
 # Jupyter
 .ipynb_checkpoints/

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from AsyncClaw.agent.skills import load_workspace_skills
 from AsyncClaw.agent.workspace import DEFAULT_SYSTEM_PROMPT, WorkspaceStore
 
 
@@ -19,6 +20,7 @@ class WorkspaceStoreTest(unittest.TestCase):
             self.assertTrue(workspace.history_dir.is_dir())
             self.assertTrue(workspace.memory_dir.is_dir())
             self.assertTrue(workspace.cron_dir.is_dir())
+            self.assertTrue(workspace.skills_dir.is_dir())
 
     def test_session_reads_all_turns_below_summary_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -140,6 +142,71 @@ class WorkspaceStoreTest(unittest.TestCase):
         self.assertIn("长期目标和计划", prompt)
         self.assertIn("不要记录到 memory", prompt)
         self.assertIn("（暂无用户画像）", prompt)
+        self.assertNotIn("<available_skills>", prompt)
+
+    def test_workspace_loads_skills_in_stable_order(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = WorkspaceStore(root=Path(directory) / "workspace")
+            (workspace.skills_dir / "z-review").mkdir()
+            (workspace.skills_dir / "z-review" / "SKILL.md").write_text(
+                "---\n"
+                "name: z-review\n"
+                "description: 严格审查代码。\n"
+                "---\n"
+                "使用严格代码审查口吻。",
+                encoding="utf-8",
+            )
+            (workspace.skills_dir / "a-python").mkdir()
+            (workspace.skills_dir / "a-python" / "SKILL.md").write_text(
+                "---\n"
+                "name: a-python\n"
+                "description: 处理 Python 代码。\n"
+                "---\n"
+                "\n优先使用 Python 标准库。\n",
+                encoding="utf-8",
+            )
+            (workspace.skills_dir / "empty").mkdir()
+            (workspace.skills_dir / "empty" / "SKILL.md").write_text(
+                "   ",
+                encoding="utf-8",
+            )
+
+            skills = workspace.load_skills()
+            skills_prompt = workspace.load_skills_prompt()
+            system_prompt = workspace.build_system_prompt()
+
+        self.assertEqual([skill.name for skill in skills], ["a-python", "z-review"])
+        self.assertIn('<skill name="a-python" description="处理 Python 代码。" />', skills_prompt)
+        self.assertIn('<skill name="z-review" description="严格审查代码。" />', skills_prompt)
+        self.assertNotIn("优先使用 Python 标准库", skills_prompt)
+        self.assertNotIn("使用严格代码审查口吻", skills_prompt)
+        self.assertNotIn("empty", skills_prompt)
+        self.assertIn("<available_skills>", system_prompt)
+        self.assertIn("先调用 load_skill 读取正文", system_prompt)
+        self.assertLess(
+            system_prompt.index('name="a-python"'),
+            system_prompt.index('name="z-review"'),
+        )
+
+    def test_invalid_skills_are_skipped_but_debuggable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = WorkspaceStore(root=Path(directory) / "workspace")
+            (workspace.skills_dir / "missing-description").mkdir()
+            (workspace.skills_dir / "missing-description" / "SKILL.md").write_text(
+                "---\n"
+                "name: missing-description\n"
+                "---\n"
+                "正文",
+                encoding="utf-8",
+            )
+
+            valid_skills = load_workspace_skills(workspace.skills_dir)
+            all_skills = load_workspace_skills(workspace.skills_dir, include_invalid=True)
+
+        self.assertEqual(valid_skills, [])
+        self.assertEqual(len(all_skills), 1)
+        self.assertFalse(all_skills[0].valid)
+        self.assertEqual(all_skills[0].error, "缺少 description")
 
     def test_default_prompt_does_not_embed_specific_user_facts(self) -> None:
         self.assertNotIn("打篮球", DEFAULT_SYSTEM_PROMPT)

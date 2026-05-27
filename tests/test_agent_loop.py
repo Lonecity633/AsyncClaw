@@ -380,6 +380,15 @@ class AgentLoopTest(unittest.TestCase):
                 session_id="session-a",
             )
             workspace.save_user_profile("# 用户画像\n- 常用 pyclaw 环境")
+            (workspace.skills_dir / "python-helper").mkdir()
+            (workspace.skills_dir / "python-helper" / "SKILL.md").write_text(
+                "---\n"
+                "name: python-helper\n"
+                "description: 处理 Python 代码时使用。\n"
+                "---\n"
+                "回答 Python 问题时先考虑标准库。",
+                encoding="utf-8",
+            )
             for index in range(12):
                 workspace.append_session_turn([
                     {"role": "user", "content": f"old-{index}"},
@@ -399,6 +408,9 @@ class AgentLoopTest(unittest.TestCase):
         self.assertEqual(result.output, "已读取 workspace")
         self.assertEqual(request_messages[0]["role"], "system")
         self.assertIn("常用 pyclaw 环境", request_messages[0]["content"])
+        self.assertIn('name="python-helper"', request_messages[0]["content"])
+        self.assertIn("处理 Python 代码时使用。", request_messages[0]["content"])
+        self.assertNotIn("回答 Python 问题时先考虑标准库。", request_messages[0]["content"])
         self.assertEqual([message["content"] for message in request_messages[1:13]], [
             f"old-{index}" for index in range(12)
         ])

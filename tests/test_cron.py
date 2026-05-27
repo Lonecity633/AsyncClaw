@@ -538,6 +538,15 @@ class CronServiceTest(unittest.TestCase):
         now = datetime(2026, 1, 1, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
             workspace = WorkspaceStore(root=Path(directory) / "workspace")
+            (workspace.skills_dir / "cron-style").mkdir()
+            (workspace.skills_dir / "cron-style" / "SKILL.md").write_text(
+                "---\n"
+                "name: cron-style\n"
+                "description: 输出定时任务结果时保持简洁。\n"
+                "---\n"
+                "定时任务结果保持简洁。",
+                encoding="utf-8",
+            )
             llm = CurrentTimeToolLLM()
             service = AgentService(
                 cwd=directory,
@@ -562,9 +571,13 @@ class CronServiceTest(unittest.TestCase):
             for tool in llm.requests[0]["tools"]
         ]
         self.assertIn("current_time", first_request_tools)
+        self.assertIn("load_skill", first_request_tools)
         self.assertEqual(llm.requests[0]["messages"][-1]["role"], "user")
         self.assertEqual(llm.requests[0]["messages"][-1]["content"], "输出当前时间")
         self.assertIn("这是定时任务的一次触发", llm.requests[0]["messages"][0]["content"])
+        self.assertIn('name="cron-style"', llm.requests[0]["messages"][0]["content"])
+        self.assertIn("输出定时任务结果时保持简洁。", llm.requests[0]["messages"][0]["content"])
+        self.assertNotIn("定时任务结果保持简洁。", llm.requests[0]["messages"][0]["content"])
         self.assertNotIn("原始任务：输出当前时间", llm.requests[0]["messages"][-1]["content"])
         self.assertEqual(len(llm.requests), 2)
         self.assertTrue(results[0]["success"])
@@ -641,6 +654,103 @@ class CronToolTest(unittest.TestCase):
         self.assertEqual(listed["jobs"][0]["action"], "agent")
         self.assertTrue(deleted["deleted"])
         self.assertEqual(payload["jobs"], [])
+
+    def test_cron_tools_clear_all_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = WorkspaceStore(root=Path(directory) / "workspace")
+            registry = build_tool_registry(ToolContext(cwd=Path(directory)), workspace=workspace)
+
+            registry.call(
+                "create_cron_job",
+                {
+                    "name": "提醒 A",
+                    "prompt": "提醒我休息",
+                    "schedule": {"type": "every", "seconds": 120},
+                },
+            )
+            registry.call(
+                "create_cron_job",
+                {
+                    "name": "提醒 B",
+                    "prompt": "提醒我喝水",
+                    "schedule": {"type": "every", "seconds": 180},
+                },
+            )
+            cleared = registry.call("clear_cron_jobs", {})
+            listed = registry.call("list_cron_jobs", {})
+            payload = json.loads(workspace.cron_jobs_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(cleared["deleted"], 2)
+        self.assertEqual(cleared["jobs"], [])
+        self.assertEqual(listed["jobs"], [])
+        self.assertEqual(payload["jobs"], [])
+
+    def test_load_skill_tool_returns_body_and_resources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = WorkspaceStore(root=Path(directory) / "workspace")
+            skill_dir = workspace.skills_dir / "safe-code-review"
+            references_dir = skill_dir / "references"
+            references_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\n"
+                "name: safe-code-review\n"
+                "description: 安全代码审查。\n"
+                "---\n"
+                "先检查输入校验和路径边界。",
+                encoding="utf-8",
+            )
+            (references_dir / "checklist.md").write_text(
+                "- 检查路径越界\n",
+                encoding="utf-8",
+            )
+            registry = build_tool_registry(ToolContext(cwd=Path(directory)), workspace=workspace)
+
+            body = registry.call("load_skill", {"name": "safe-code-review"})
+            resource = registry.call(
+                "load_skill",
+                {
+                    "name": "safe-code-review",
+                    "resource_path": "references/checklist.md",
+                },
+            )
+
+        self.assertTrue(body["loaded"])
+        self.assertEqual(body["description"], "安全代码审查。")
+        self.assertIn("先检查输入校验", body["content"])
+        self.assertTrue(resource["loaded"])
+        self.assertIn("检查路径越界", resource["content"])
+
+    def test_load_skill_tool_blocks_unsafe_resources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = WorkspaceStore(root=Path(directory) / "workspace")
+            skill_dir = workspace.skills_dir / "safe-code-review"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\n"
+                "name: safe-code-review\n"
+                "description: 安全代码审查。\n"
+                "---\n"
+                "正文",
+                encoding="utf-8",
+            )
+            registry = build_tool_registry(ToolContext(cwd=Path(directory)), workspace=workspace)
+
+            parent = registry.call(
+                "load_skill",
+                {"name": "safe-code-review", "resource_path": "../secret.txt"},
+            )
+            absolute = registry.call(
+                "load_skill",
+                {"name": "safe-code-review", "resource_path": "/etc/passwd"},
+            )
+            missing = registry.call("load_skill", {"name": "unknown"})
+
+        self.assertFalse(parent["loaded"])
+        self.assertIn("相对路径", parent["error"])
+        self.assertFalse(absolute["loaded"])
+        self.assertIn("相对路径", absolute["error"])
+        self.assertFalse(missing["loaded"])
+        self.assertEqual(missing["error"], "未知 skill")
 
     def test_cron_tool_defaults_to_agent_without_prompt_keywords(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

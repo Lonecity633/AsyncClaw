@@ -12,6 +12,8 @@ from pathlib import Path
 from uuid import uuid4
 from typing import Any, Callable, ClassVar
 
+from AsyncClaw.agent.skills import Skill, build_skills_catalog, load_workspace_skills
+
 
 DEFAULT_SYSTEM_PROMPT = """你是 AsyncClaw 智能体。
 
@@ -58,6 +60,7 @@ class WorkspaceStore:
         self.history_dir.mkdir(parents=True, exist_ok=True)
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self.cron_dir.mkdir(parents=True, exist_ok=True)
+        self.skills_dir.mkdir(parents=True, exist_ok=True)
 
     @classmethod
     def _lock_for_path(cls, path: Path) -> threading.RLock:
@@ -84,6 +87,10 @@ class WorkspaceStore:
     @property
     def cron_dir(self) -> Path:
         return self.root / "cron"
+
+    @property
+    def skills_dir(self) -> Path:
+        return self.root / "skills"
 
     @property
     def session_path(self) -> Path:
@@ -166,6 +173,12 @@ class WorkspaceStore:
             return ""
         return self.user_profile_path.read_text(encoding="utf-8")
 
+    def load_skills(self) -> list[Skill]:
+        return load_workspace_skills(self.skills_dir)
+
+    def load_skills_prompt(self) -> str:
+        return build_skills_catalog(self.load_skills())
+
     def load_short_term_summary(self) -> str:
         if not self.short_term_summary_path.exists():
             return ""
@@ -232,7 +245,17 @@ class WorkspaceStore:
         profile = self.load_user_profile().strip()
         if not profile:
             profile = "（暂无用户画像）"
-        return f"{prompt}\n\n当前用户画像：\n{profile}"
+        system_prompt = f"{prompt}\n\n当前用户画像：\n{profile}"
+        skills_prompt = self.load_skills_prompt().strip()
+        if skills_prompt:
+            system_prompt = (
+                f"{system_prompt}\n\n可用 Skills：\n{skills_prompt}\n\n"
+                "Skills 使用规则：\n"
+                "- 这里仅列出可用 skill 的 name 和 description，不包含完整说明。\n"
+                "- 当用户任务匹配某个 skill 的 description 时，先调用 load_skill 读取正文，再继续执行。\n"
+                "- 只有当 skill 正文明确要求读取附加资料时，才用 resource_path 读取该 skill 目录内资源。"
+            )
+        return system_prompt
 
     def _append_jsonl(self, path: Path, record: dict[str, Any]) -> None:
         with self._lock_for_path(path):

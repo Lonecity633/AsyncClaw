@@ -144,6 +144,14 @@ class CronStore:
                 self._write_jobs(kept)
             return deleted
 
+    def clear_jobs(self) -> int:
+        with self._lock:
+            jobs = self.list_jobs()
+            deleted_count = len(jobs)
+            if deleted_count:
+                self._write_jobs([])
+            return deleted_count
+
     def due_jobs(self, now: datetime | None = None) -> list[CronJob]:
         with self._lock:
             now = now or _utc_datetime()

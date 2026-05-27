@@ -34,6 +34,10 @@ def create_cron_tools(workspace: WorkspaceStore) -> list[Tool]:
         deleted = store.delete_job(job_id.strip())
         return {"deleted": deleted, "id": job_id.strip()}
 
+    def clear_cron_jobs(arguments: dict[str, Any]) -> dict[str, Any]:
+        deleted_count = store.clear_jobs()
+        return {"deleted": deleted_count, "jobs": []}
+
     return [
         Tool(
             name="create_cron_job",
@@ -106,5 +110,18 @@ def create_cron_tools(workspace: WorkspaceStore) -> list[Tool]:
                 "additionalProperties": False,
             },
             handler=delete_cron_job,
+        ),
+        Tool(
+            name="clear_cron_jobs",
+            description=(
+                "删除 workspace/cron/jobs.json 中的所有定时任务。"
+                "当用户要求停止所有、取消所有、删除所有或清空所有定时任务时使用。"
+            ),
+            schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            handler=clear_cron_jobs,
         ),
     ]
